@@ -76,12 +76,16 @@ const stats_window = 0.5;
 /// A SIMD vector, so arithmetic is element-wise (`a + b`, `a * @as(Vec3, @splat(k))`).
 pub const Vec3 = @Vector(3, f32);
 
-pub fn dot(a: Vec3, b: Vec3) f32 {
+fn dot(a: Vec3, b: Vec3) f32 {
     return @reduce(.Add, a * b);
 }
 
 pub fn length(a: Vec3) f32 {
     return @sqrt(dot(a, a));
+}
+
+pub fn normalize(a: Vec3) Vec3 {
+    return a / splat(length(a));
 }
 
 pub fn cross(a: Vec3, b: Vec3) Vec3 {
@@ -491,6 +495,37 @@ pub const OrbitCam = struct {
     }
 };
 
+/// What one frame of pointer input does to the camera.
+pub const Gesture = union(enum) {
+    none,
+    /// Turn by this frame's mouse delta (raylib moves the mouse with one finger too).
+    drag,
+    /// Zoom by this ratio of finger spans (`OrbitCam.pinch`).
+    pinch: f32,
+};
+
+/// Turns raw pointer input into gestures: left mouse button or one finger
+/// drags, two fingers pinch. Remembers the previous frame, so the frame a
+/// touch starts (or a pinch ends) is no drag: the mouse jumps to the finger
+/// then.
+pub const TouchSteer = struct {
+    touches_before: u32 = 0,
+    span_before: f32 = 0,
+
+    /// One frame: `touches` fingers down, `span` pixels between the first
+    /// two (ignored for fewer), `mouse_down` the left button.
+    pub fn update(self: *TouchSteer, touches: u32, span: f32, mouse_down: bool) Gesture {
+        defer self.touches_before = touches;
+        if (touches >= 2) {
+            defer self.span_before = span;
+            if (self.touches_before >= 2 and self.span_before > 0) return .{ .pinch = span / self.span_before };
+            return .none;
+        }
+        if (touches == 1) return if (self.touches_before == 1) .drag else .none;
+        return if (mouse_down) .drag else .none;
+    }
+};
+
 pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]ecs.entity_t };
 
 /// The mother star at `at`, anchored there, and her children spread evenly
@@ -586,15 +621,28 @@ pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
     });
 }
 
-/// Query over every drawable entity: term 0 = `Position`, term 1 = `Ball`,
-/// term 2 = optional `PrevPosition` (null field for static entities).
+/// Query over every mother star: term 0 = `Position`, term 1 = optional
+/// `PrevPosition`, term 2 = `Ball`. Caller owns it (`ecs.query_fini`).
+pub fn motherQuery(world: *ecs.world_t) !*ecs.query_t {
+    return ecs.query_init(world, &.{
+        .terms = [_]ecs.term_t{
+            .{ .id = ecs.id(Position) },
+            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.id(Ball) },
+            .{ .id = ecs.id(Mother) },
+        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
+    });
+}
+
+/// Query over every drawable entity: term 0 = `Position`, term 1 = optional
+/// `PrevPosition` (null field for static entities), term 2 = `Ball`.
 /// Caller owns it (`ecs.query_fini`).
 pub fn ballQuery(world: *ecs.world_t) !*ecs.query_t {
     return ecs.query_init(world, &.{
         .terms = [_]ecs.term_t{
             .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(Ball) },
             .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.id(Ball) },
         } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
     });
 }
@@ -917,7 +965,7 @@ test "ballQuery yields every star and planet, all moving" {
     var it = ecs.query_iter(world, q);
     while (ecs.query_next(&it)) {
         n += it.count();
-        if (ecs.field(&it, PrevPosition, 2) != null) with_prev += it.count();
+        if (ecs.field(&it, PrevPosition, 1) != null) with_prev += it.count();
     }
     const total = 1 + child_stretch.len + planet_starts.len;
     try expectEqual(total, n);
@@ -965,7 +1013,13 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     register(world);
     const c = spawnCluster(world, .{ 0, 0, 0 });
     const ps = spawnPlanets(world, c.mother);
-    try expect(ecs.has_id(world, c.mother, ecs.id(Mother)));
+    const mq = try motherQuery(world);
+    defer ecs.query_fini(mq);
+    var mit = ecs.query_iter(world, mq);
+    try expect(ecs.query_next(&mit));
+    try expectEqual(@as(usize, 1), mit.entities().len);
+    try expectEqual(c.mother, mit.entities()[0]);
+    while (ecs.query_next(&mit)) {} // finish the iterator
 
     for ([_]struct { q: *ecs.query_t, n: usize }{
         .{ .q = try linkQuery(world, Cord), .n = c.children.len },
@@ -981,4 +1035,23 @@ test "links: children hang on the mother by cords, planets are her inputs" {
         }
         try expectEqual(link.n, n);
     }
+}
+
+test "TouchSteer: a touch drags from its second frame, mouse drags at once" {
+    var t: TouchSteer = .{};
+    try expectEqual(Gesture.none, t.update(0, 0, false));
+    try expectEqual(Gesture.drag, t.update(0, 0, true));
+    try expectEqual(Gesture.none, t.update(1, 0, false)); // finger lands: the mouse jumps
+    try expectEqual(Gesture.drag, t.update(1, 0, false));
+    try expectEqual(Gesture.none, t.update(0, 0, false));
+}
+
+test "TouchSteer: two fingers pinch by span ratio; lifting one skips a frame" {
+    var t: TouchSteer = .{};
+    try expectEqual(Gesture.none, t.update(2, 100, false)); // first frame: no span before
+    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(2, 150, false));
+    try expectEqual(Gesture.none, t.update(1, 0, false)); // one finger left: it may jump
+    try expectEqual(Gesture.drag, t.update(1, 0, false));
+    try expectEqual(Gesture.none, t.update(2, 0, false));
+    try expectEqual(Gesture.none, t.update(2, 80, false)); // span 0 before: no ratio
 }

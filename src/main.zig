@@ -76,8 +76,12 @@ var world: *ecs.world_t = undefined;
 var balls: *ecs.query_t = undefined;
 var cords: *ecs.query_t = undefined;
 var inputs: *ecs.query_t = undefined;
-var mother: ecs.entity_t = undefined;
+var mothers: *ecs.query_t = undefined;
 var cam: sim.OrbitCam = undefined;
+var touch: sim.TouchSteer = .{};
+/// This frame's interpolation weight and camera position, for the draw callbacks.
+var alpha: f32 = 0;
+var eye: sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
 var stats: sim.FrameStats = .{};
 
@@ -89,8 +93,7 @@ pub fn main() !void {
     defer _ = ecs.fini(world);
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
-    mother = sim.spawnCluster(world, .{ 0, 0, 0 }).mother;
-    _ = sim.spawnPlanets(world, mother);
+    _ = sim.spawnPlanets(world, sim.spawnCluster(world, .{ 0, 0, 0 }).mother);
     cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius);
 
     balls = try sim.ballQuery(world);
@@ -99,6 +102,8 @@ pub fn main() !void {
     defer ecs.query_fini(cords);
     inputs = try sim.linkQuery(world, sim.InputOf);
     defer ecs.query_fini(inputs);
+    mothers = try sim.motherQuery(world);
+    defer ecs.query_fini(mothers);
 
     if (builtin.os.tag == .emscripten) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -117,36 +122,31 @@ fn frame() callconv(.c) void {
     // fling planets out of orbit, and dt=0 (first frame) would make
     // flecs measure its own clock.
     for (0..clock.advance(rl.getFrameTime())) |_| _ = ecs.progress(world, sim.step_dt);
-    const alpha = clock.alpha();
+    alpha = clock.alpha();
 
     steer();
     // The barycenter, interpolated like the stars, so the camera never
     // jitters against them.
-    cam.target = drawnOf(ecs.id(sim.Barycenter), alpha);
+    cam.target = drawnOf(ecs.id(sim.Barycenter));
+    eye = cam.eye();
 
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
 
     rl.beginMode3D(.{
-        .position = vec3(cam.eye()),
+        .position = vec3(eye),
         .target = vec3(cam.target),
         .up = .{ .x = 0, .y = 1, .z = 0 },
         .fovy = fovy,
         .projection = .perspective,
     });
-    drawLinks(alpha);
-    // Every Position + Ball entity.
-    var it = ecs.query_iter(world, balls);
-    while (ecs.query_next(&it)) {
-        const ps = ecs.field(&it, sim.Position, 0).?;
-        const bs = ecs.field(&it, sim.Ball, 1).?;
-        const prevs = ecs.field(&it, sim.PrevPosition, 2);
-        for (ps, bs, 0..) |p, b, i| {
-            const at = drawnAt(p, if (prevs) |pp| &pp[i] else null, alpha);
-            rl.drawSphere(vec3(at), b.radius, rl.getColor(b.rgba));
-        }
-    }
+    // Glowing geometry (cords, then stars and planets), then the gray links
+    // and rings, which #6's bloom pass will leave out.
+    forEachDrawn(cords, drawCord);
+    forEachDrawn(balls, drawBall);
+    forEachDrawn(inputs, drawInputLink);
+    forEachDrawn(mothers, drawRing);
     rl.endMode3D();
 
     // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
@@ -162,106 +162,88 @@ fn frame() callconv(.c) void {
     drawStat(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
 }
 
-// Touch state from the previous frame.
-var touches_before: i32 = 0;
-var span_before: f32 = 0;
-
-/// Mouse: left-drag turns the camera, the wheel zooms. Touch: one finger
-/// turns it, two fingers pinch to zoom.
+/// Mouse or one finger turns the camera, the wheel or two fingers zoom.
 fn steer() void {
-    const touches = rl.getTouchPointCount();
-    if (touches >= 2) {
-        const a = rl.getTouchPosition(0);
-        const b = rl.getTouchPosition(1);
-        const span = std.math.hypot(a.x - b.x, a.y - b.y);
-        if (touches_before >= 2 and span_before > 0) cam.pinch(span / span_before);
-        span_before = span;
-    } else if (touches == 1) {
-        // raylib moves the mouse with a single finger but never presses a
-        // button. Skip the frame a touch starts (or a pinch ends): the mouse
-        // jumps to the finger then, which is no drag.
-        if (touches_before == 1) {
+    const touches: u32 = @intCast(@max(0, rl.getTouchPointCount()));
+    const span = if (touches >= 2) rl.getTouchPosition(0).distance(rl.getTouchPosition(1)) else 0;
+    switch (touch.update(touches, span, rl.isMouseButtonDown(.left))) {
+        .none => {},
+        .drag => {
             const d = rl.getMouseDelta();
             cam.drag(d.x, d.y);
-        }
-    } else if (rl.isMouseButtonDown(.left)) {
-        const d = rl.getMouseDelta();
-        cam.drag(d.x, d.y);
+        },
+        .pinch => |ratio| cam.pinch(ratio),
     }
-    touches_before = touches;
     cam.zoom(rl.getMouseWheelMove());
 }
 
-/// Glowing cords from the children to the mother, dashed gray lines from
-/// each planet to her ring, and the ring itself.
-fn drawLinks(alpha: f32) void {
-    const m = drawnOf(mother, alpha);
-    const ring_r = ecs.get(world, mother, sim.Ball).?.radius * ring_scale;
-
-    var it = ecs.query_iter(world, cords);
+/// Calls `draw` for every entity of `q` (term 0 `Position`, term 1 optional
+/// `PrevPosition`, as every sim query lays them out) at its drawn position.
+fn forEachDrawn(q: *ecs.query_t, comptime draw: fn (it: *ecs.iter_t, i: usize, at: sim.Vec3) void) void {
+    var it = ecs.query_iter(world, q);
     while (ecs.query_next(&it)) {
-        const ps = ecs.field(&it, sim.Position, 0).?;
         const prevs = ecs.field(&it, sim.PrevPosition, 1);
-        const to = drawnOf(sim.pairTarget(&it, 2), alpha);
-        for (ps, 0..) |p, i| {
-            const from = drawnAt(p, if (prevs) |pp| &pp[i] else null, alpha);
-            rl.drawCylinderEx(vec3(from), vec3(to), cord_radius, cord_radius, cord_sides, rl.getColor(cord_glow));
-        }
+        for (ecs.field(&it, sim.Position, 0).?, 0..) |p, i| draw(&it, i, drawnAt(p, if (prevs) |pp| &pp[i] else null));
     }
-
-    it = ecs.query_iter(world, inputs);
-    while (ecs.query_next(&it)) {
-        const ps = ecs.field(&it, sim.Position, 0).?;
-        const prevs = ecs.field(&it, sim.PrevPosition, 1);
-        const to = drawnOf(sim.pairTarget(&it, 2), alpha);
-        for (ps, 0..) |p, i| {
-            const from = drawnAt(p, if (prevs) |pp| &pp[i] else null, alpha);
-            // Stop at the ring (the planet's sphere hides the start).
-            const d = to - from;
-            const len = sim.length(d) - ring_r;
-            if (len > 0) drawDashes(from, d / sim.splat(sim.length(d)), len, rl.getColor(link_gray));
-        }
-    }
-
-    drawRing(m, ring_r, rl.getColor(link_gray));
 }
 
-/// Dashes of `dash_len`, `dash_gap` apart, from `from` along unit `dir` for `len`.
-fn drawDashes(from: sim.Vec3, dir: sim.Vec3, len: f32, color: rl.Color) void {
+fn drawBall(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    rl.drawSphere(vec3(at), b.radius, rl.getColor(b.rgba));
+}
+
+/// A child's glowing cord to her mother.
+fn drawCord(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
+    const to = drawnOf(sim.pairTarget(it, 2));
+    rl.drawCylinderEx(vec3(at), vec3(to), cord_radius, cord_radius, cord_sides, rl.getColor(cord_glow));
+}
+
+/// Dashes from a planet to its mother's ring (its sphere hides the start).
+fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
+    const mother = sim.pairTarget(it, 2);
+    const d = drawnOf(mother) - at;
+    const len = sim.length(d) - ringRadius(mother);
+    if (len <= 0) return;
+    const dir = sim.normalize(d);
+    const color = rl.getColor(link_gray);
     var t: f32 = 0;
     while (t < len) : (t += dash_len + dash_gap) {
-        const end = @min(t + dash_len, len);
-        rl.drawLine3D(vec3(from + dir * sim.splat(t)), vec3(from + dir * sim.splat(end)), color);
+        rl.drawLine3D(vec3(at + dir * sim.splat(t)), vec3(at + dir * sim.splat(@min(t + dash_len, len))), color);
     }
 }
 
-/// A circle around `center` that always faces the camera.
-fn drawRing(center: sim.Vec3, r: f32, color: rl.Color) void {
-    const view = center - cam.eye();
+/// A gray circle around a mother that always faces the camera.
+fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const r = ecs.field(it, sim.Ball, 2).?[i].radius * ring_scale;
+    const view = at - eye;
     // The camera's pitch stays short of straight up or down, so view is never
     // parallel to +y and the cross products are never zero.
     const right = sim.cross(view, .{ 0, 1, 0 });
-    const up = sim.cross(right, view);
-    const u = right * sim.splat(r / sim.length(right));
-    const v = up * sim.splat(r / sim.length(up));
-    var prev = center + u;
+    const u = sim.normalize(right) * sim.splat(r);
+    const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
+    const color = rl.getColor(link_gray);
+    var prev = at + u;
     for (1..ring_segments + 1) |k| {
         const t = std.math.tau * @as(f32, @floatFromInt(k)) / ring_segments;
-        const next = center + u * sim.splat(@cos(t)) + v * sim.splat(@sin(t));
+        const next = at + u * sim.splat(@cos(t)) + v * sim.splat(@sin(t));
         rl.drawLine3D(vec3(prev), vec3(next), color);
         prev = next;
     }
 }
 
+fn ringRadius(mother: ecs.entity_t) f32 {
+    return ecs.get(world, mother, sim.Ball).?.radius * ring_scale;
+}
+
 /// `drawnAt` for an entity looked up by id.
-fn drawnOf(e: ecs.entity_t, alpha: f32) sim.Vec3 {
-    return drawnAt(ecs.get(world, e, sim.Position).?.*, ecs.get(world, e, sim.PrevPosition), alpha);
+fn drawnOf(e: ecs.entity_t) sim.Vec3 {
+    return drawnAt(ecs.get(world, e, sim.Position).?.*, ecs.get(world, e, sim.PrevPosition));
 }
 
 /// Where to draw an entity: between its last two steps when it moves, so
 /// motion stays smooth when frames don't line up with steps (rAF jitter,
 /// 120/144 Hz screens).
-fn drawnAt(p: sim.Position, prev: ?*const sim.PrevPosition, alpha: f32) sim.Vec3 {
+fn drawnAt(p: sim.Position, prev: ?*const sim.PrevPosition) sim.Vec3 {
     const pp = prev orelse return p.v;
     return std.math.lerp(pp.v, p.v, sim.splat(alpha));
 }

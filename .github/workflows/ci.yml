@@ -83,8 +83,7 @@ jobs:
             exit 1
           fi
 
-      # Version index.js and index.wasm by commit: Pages caches each file for
-      # 10 minutes under one name, so a reload could mix builds.
+      # Version index.js/index.wasm by commit (why: web/stamp.sh).
       - name: Stamp the build
         run: web/stamp.sh zig-out/web "${GITHUB_SHA::8}"
 
