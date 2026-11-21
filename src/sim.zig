@@ -5,11 +5,11 @@ const ecs = @import("zflecs");
 
 // Ball colours from the tech-trio.svg palette (0xRRGGBBAA); render-only
 // colours live in main.zig and web/shell.html.
-pub const orange: u32 = 0xC87137FF;
-pub const teal: u32 = 0x2E7E7EFF;
+const orange: u32 = 0xC87137FF;
+const teal: u32 = 0x2E7E7EFF;
 // Star colours: the mother is the brightest (warm white), her children green.
-pub const mother_white: u32 = 0xFFF1D6FF;
-pub const child_green: u32 = 0x4FC27AFF;
+const mother_white: u32 = 0xFFF1D6FF;
+const child_green: u32 = 0x4FC27AFF;
 
 // Demo ball sizes, as fractions of the orbit radius.
 const attractor_size = 0.16;
@@ -38,10 +38,11 @@ const child_starts = [_]struct { stretch: f32, lift: f32 }{
     .{ .stretch = -0.1, .lift = -0.25 },
     .{ .stretch = 0.05, .lift = 0.1 },
 };
+const cluster_mass = mother_mass + child_mass * @as(f32, child_starts.len);
 /// Roughly how far the cluster reaches from its barycenter, for framing it.
 pub const cluster_radius = cord_rest + child_radius;
 /// Most stars the `cluster` system handles (it works on all of them at once).
-pub const max_stars = 16;
+const max_stars = 16;
 
 /// How long `FrameStats` collects (seconds) before it updates its readout.
 const stats_window = 0.5;
@@ -79,9 +80,10 @@ pub const Star = struct { mass: f32 };
 pub const Cord = struct { rest: f32 };
 /// A weak spring holds the star near `v` (the mother's anchor).
 pub const Home = struct { v: Vec3 };
-/// Singleton: mass-weighted center of all stars, after the latest step and
-/// the one before it (so rendering can interpolate it like `PrevPosition`).
-pub const Barycenter = struct { prev: Vec3, cur: Vec3 };
+/// Tag on the entity `ecs.id(Barycenter)` (a singleton): its `Position` is the
+/// mass-weighted center of all stars, and its `PrevPosition` (from `snapshot`,
+/// like any moving entity) lets rendering interpolate it.
+pub const Barycenter = struct {};
 /// Relationship `(Orbits, center)`: accelerates toward `center`, which must
 /// have `Position` + `Attractor`. As a pair, every orbiter of one center
 /// shares a table, so systems read the center once per table, not per entity.
@@ -136,7 +138,7 @@ pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, Star);
     ecs.COMPONENT(world, Cord);
     ecs.COMPONENT(world, Home);
-    ecs.COMPONENT(world, Barycenter);
+    ecs.TAG(world, Barycenter);
     addSystem(world, "snapshot", ecs.OnLoad, snapshot, &.{});
     // gravity and cluster (PreUpdate) update velocity before move (OnUpdate)
     // uses it: semi-implicit Euler, which keeps orbits and springs from
@@ -154,7 +156,7 @@ pub fn register(world: *ecs.world_t) void {
     addRunSystem(world, "barycenter", ecs.PostUpdate, barycenter, &.{
         .{ .id = ecs.id(Position), .inout = .In },
         .{ .id = ecs.id(Star), .inout = .In },
-        .{ .id = ecs.id(Barycenter), .src = .{ .id = ecs.id(Barycenter) }, .inout = .InOut },
+        .{ .id = ecs.id(Position), .src = .{ .id = ecs.id(Barycenter) }, .inout = .InOut },
     });
 }
 
@@ -203,79 +205,85 @@ const bary_pos = 0;
 const bary_star = 1;
 const bary_out = 2;
 
+/// One star, as `cluster` gathers it.
+const Body = struct {
+    e: ecs.entity_t,
+    pos: Vec3,
+    mass: f32,
+    /// Into its table, which stays put while the system runs: write through it.
+    vel: *Vec3,
+    cord: ?struct { mother: ecs.entity_t, rest: f32 },
+    home: ?Vec3,
+};
+
 /// Cord springs, pair pushes and the home anchor, on every star at once.
 fn cluster(it: *ecs.iter_t) callconv(.c) void {
-    const dt = it.delta_time;
+    var bodies: [max_stars]Body = undefined;
     var n: usize = 0;
-    var ent: [max_stars]ecs.entity_t = undefined;
-    var pos: [max_stars]Vec3 = undefined;
-    var mass: [max_stars]f32 = undefined;
-    // Velocities stay in their tables while the system runs: write through these.
-    var vel: [max_stars]*Vec3 = undefined;
-    var mother: [max_stars]?ecs.entity_t = undefined;
-    var rest: [max_stars]f32 = undefined;
-    var home: [max_stars]?Vec3 = undefined;
-
     while (ecs.iter_next(it)) {
+        const cords = ecs.field(it, Cord, cluster_cord);
+        const mother = if (cords != null) ecs.pair_second(ecs.field_id(it, cluster_cord)) else 0;
+        const homes = ecs.field(it, Home, cluster_home);
         const ps = ecs.field(it, Position, cluster_pos).?;
         const vs = ecs.field(it, Velocity, cluster_vel).?;
         const ss = ecs.field(it, Star, cluster_star).?;
-        const cords = ecs.field(it, Cord, cluster_cord);
-        const target = if (cords != null) ecs.pair_second(ecs.field_id(it, cluster_cord)) else 0;
-        const homes = ecs.field(it, Home, cluster_home);
         for (it.entities(), ps, vs, ss, 0..) |e, p, *v, s, i| {
             if (n == max_stars) @panic("more stars than sim.max_stars");
-            ent[n] = e;
-            pos[n] = p.v;
-            mass[n] = s.mass;
-            vel[n] = &v.v;
-            mother[n] = if (cords != null) target else null;
-            rest[n] = if (cords) |c| c[i].rest else 0;
-            home[n] = if (homes) |h| h[i].v else null;
+            bodies[n] = .{
+                .e = e,
+                .pos = p.v,
+                .mass = s.mass,
+                .vel = &v.v,
+                .cord = if (cords) |c| .{ .mother = mother, .rest = c[i].rest } else null,
+                .home = if (homes) |h| h[i].v else null,
+            };
             n += 1;
         }
     }
+    const bs = bodies[0..n];
 
     var acc: [max_stars]Vec3 = @splat(splat(0));
-    for (0..n) |i| {
-        if (home[i]) |h| acc[i] += (h - pos[i]) * splat(home_k / mass[i]);
-        if (mother[i]) |m| {
-            const j = std.mem.indexOfScalar(ecs.entity_t, ent[0..n], m) orelse continue;
-            const d = pos[j] - pos[i];
-            const r = length(d);
-            if (r == 0) continue;
-            // Positive when stretched: pulls i toward j and j toward i.
-            const f = d * splat(cord_k * (r - rest[i]) / r);
-            acc[i] += f / splat(mass[i]);
-            acc[j] -= f / splat(mass[j]);
+    for (bs, 0..) |b, i| {
+        if (b.home) |h| acc[i] += (h - b.pos) * splat(home_k / b.mass);
+        if (b.cord) |cord| {
+            for (bs, 0..) |m, j| {
+                if (m.e != cord.mother) continue;
+                const d = m.pos - b.pos;
+                const r = length(d);
+                if (r == 0) break;
+                // Positive when stretched: pulls b toward m and m toward b.
+                const f = d * splat(cord_k * (r - cord.rest) / r);
+                acc[i] += f / splat(b.mass);
+                acc[j] -= f / splat(m.mass);
+                break;
+            }
         }
-        for (i + 1..n) |j| {
-            const d = pos[i] - pos[j];
+        for (bs[i + 1 ..], i + 1..) |o, j| {
+            const d = b.pos - o.pos;
             const r2 = dot(d, d);
             if (r2 == 0) continue;
             const f = d * splat(repel / ((r2 + repel_soft) * @sqrt(r2)));
-            acc[i] += f / splat(mass[i]);
-            acc[j] -= f / splat(mass[j]);
+            acc[i] += f / splat(b.mass);
+            acc[j] -= f / splat(o.mass);
         }
     }
-    for (vel[0..n], acc[0..n]) |v, a| v.* += a * splat(dt);
+    for (bs, acc[0..n]) |b, a| b.vel.* += a * splat(it.delta_time);
 }
 
 /// Mass-weighted center of the stars into the `Barycenter` singleton.
 fn barycenter(it: *ecs.iter_t) callconv(.c) void {
     var sum = splat(0);
     var total: f32 = 0;
-    var out: ?*Barycenter = null;
+    var out: ?*Position = null;
     while (ecs.iter_next(it)) {
-        out = &ecs.field(it, Barycenter, bary_out).?[0];
+        out = &ecs.field(it, Position, bary_out).?[0];
         for (ecs.field(it, Position, bary_pos).?, ecs.field(it, Star, bary_star).?) |p, s| {
             sum += p.v * splat(s.mass);
             total += s.mass;
         }
     }
     const b = out orelse return;
-    b.prev = b.cur;
-    if (total > 0) b.cur = sum / splat(total);
+    if (total > 0) b.v = sum / splat(total);
 }
 
 fn move(it: *ecs.iter_t, positions: []Position, velocities: []const Velocity) void {
@@ -393,7 +401,7 @@ pub const OrbitCam = struct {
     }
 };
 
-pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t, radius: f32 };
+pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t };
 
 /// A static ball at `at` and a second ball circling it in the horizontal (xz)
 /// plane at `radius`, once every `period` seconds. Speed and pull are chosen
@@ -415,7 +423,7 @@ pub fn spawnDemo(world: *ecs.world_t, at: Vec3, radius: f32, period: f32) Demo {
     ecs.add_pair(world, orbiter, ecs.id(Orbits), center);
     set(world, orbiter, Ball, .{ .radius = radius * orbiter_size, .rgba = teal });
 
-    return .{ .center = center, .orbiter = orbiter, .radius = radius };
+    return .{ .center = center, .orbiter = orbiter };
 }
 
 pub const Cluster = struct { mother: ecs.entity_t, children: [child_starts.len]ecs.entity_t };
@@ -437,8 +445,9 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
         setPair(world, child.*, Cord, c.mother, .{ .rest = cord_rest });
         sum += p * splat(child_mass);
     }
-    const center = sum / splat(mother_mass + child_mass * @as(f32, child_starts.len));
-    set(world, ecs.id(Barycenter), Barycenter, .{ .prev = center, .cur = center });
+    const center = sum / splat(cluster_mass);
+    set(world, ecs.id(Barycenter), Position, .{ .v = center });
+    set(world, ecs.id(Barycenter), PrevPosition, .{ .v = center });
     return c;
 }
 
@@ -720,7 +729,7 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
 
     var drift: f32 = 0;
     for (0..2 * 60 * 60) |_| { // two minutes
-        const before = ecs.get(world, ecs.id(Barycenter), Barycenter).?.cur;
+        const before = positionOf(world, ecs.id(Barycenter));
         step(world, 1);
         const m = positionOf(world, c.mother);
         try expect(distance(m, home) < 0.4);
@@ -732,10 +741,10 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
             sum += p * splat(child_mass);
         }
         // The singleton is the mass-weighted mean, and remembers the step before.
-        const b = ecs.get(world, ecs.id(Barycenter), Barycenter).?;
-        try expect(distance(b.cur, sum / splat(mother_mass + child_mass * @as(f32, child_starts.len))) < 1e-4);
-        try expectEqual(before, b.prev);
-        drift = @max(drift, distance(b.cur, home));
+        const b = positionOf(world, ecs.id(Barycenter));
+        try expect(distance(b, sum / splat(cluster_mass)) < 1e-4);
+        try expectEqual(before, ecs.get(world, ecs.id(Barycenter), PrevPosition).?.v);
+        drift = @max(drift, distance(b, home));
     }
     try expect(drift > 0.05 and drift < 0.3);
 }

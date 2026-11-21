@@ -107,8 +107,8 @@ fn frame() callconv(.c) void {
     cam.zoom(rl.getMouseWheelMove());
     // The barycenter, interpolated like the stars, so the camera never
     // jitters against them.
-    const bary = ecs.get(world, ecs.id(sim.Barycenter), sim.Barycenter).?;
-    cam.target = std.math.lerp(bary.prev, bary.cur, sim.splat(alpha));
+    const bary = ecs.id(sim.Barycenter);
+    cam.target = drawnAt(ecs.get(world, bary, sim.Position).?.*, ecs.get(world, bary, sim.PrevPosition), alpha);
 
     rl.beginDrawing();
     defer rl.endDrawing();
