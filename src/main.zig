@@ -95,7 +95,7 @@ pub fn main() !void {
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
     // Fixed steps, never raylib's raw dt: a long frame would otherwise
-    // throw the orbit off for good, and dt=0 (first frame) would make
+    // fling planets out of orbit, and dt=0 (first frame) would make
     // flecs measure its own clock.
     for (0..clock.advance(rl.getFrameTime())) |_| _ = ecs.progress(world, sim.step_dt);
     const alpha = clock.alpha();
