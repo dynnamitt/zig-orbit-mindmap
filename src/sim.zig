@@ -77,6 +77,7 @@ pub const Attractor = struct { mu: f32 };
 pub const Star = struct { mass: f32 };
 /// Relationship `(Cord, mother)`: a spring of `rest` length between this star
 /// and `mother` (also a `Star`). It pulls when stretched, pushes when squeezed.
+/// At most one per star (safe builds check both rules).
 pub const Cord = struct { rest: f32 };
 /// A weak spring holds the star near `v` (the mother's anchor).
 pub const Home = struct { v: Vec3 };
@@ -222,13 +223,18 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
     var n: usize = 0;
     while (ecs.iter_next(it)) {
         const cords = ecs.field(it, Cord, cluster_cord);
-        const mother = if (cords != null) ecs.pair_second(ecs.field_id(it, cluster_cord)) else 0;
+        // pair_second keeps only the id's low 32 bits; get_alive restores the
+        // generation, or a mother on a recycled id would never match.
+        const mother = if (cords != null) ecs.get_alive(it.world, ecs.pair_second(ecs.field_id(it, cluster_cord))) else 0;
         const homes = ecs.field(it, Home, cluster_home);
         const ps = ecs.field(it, Position, cluster_pos).?;
         const vs = ecs.field(it, Velocity, cluster_vel).?;
         const ss = ecs.field(it, Star, cluster_star).?;
         for (it.entities(), ps, vs, ss, 0..) |e, p, *v, s, i| {
             if (n == max_stars) @panic("more stars than sim.max_stars");
+            // A second (Cord, *) pair would match this table again and add the
+            // star twice, doubling its forces.
+            if (std.debug.runtime_safety) for (bodies[0..n]) |b| if (b.e == e) @panic("a star has more than one Cord");
             bodies[n] = .{
                 .e = e,
                 .pos = p.v,
@@ -256,7 +262,7 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
                 acc[i] += f / splat(b.mass);
                 acc[j] -= f / splat(m.mass);
                 break;
-            }
+            } else if (std.debug.runtime_safety) @panic("a Cord's mother is not a Star");
         }
         for (bs[i + 1 ..], i + 1..) |o, j| {
             const d = b.pos - o.pos;
@@ -747,6 +753,19 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
         drift = @max(drift, distance(b, home));
     }
     try expect(drift > 0.05 and drift < 0.3);
+}
+
+test "cords hold on recycled entity ids" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    // Freed ids come back with a higher generation in their upper bits.
+    for (0..8) |_| ecs.delete(world, ecs.new_id(world));
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    try expect(c.mother >> 32 != 0);
+
+    step(world, 10 * 60);
+    for (c.children) |child| try expect(distance(positionOf(world, child), positionOf(world, c.mother)) < cord_rest + 0.6);
 }
 
 test "cord pulls when stretched and pushes when squeezed, on both ends" {
