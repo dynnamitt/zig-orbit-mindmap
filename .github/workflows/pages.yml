@@ -61,6 +61,10 @@ jobs:
             exit 1
           fi
 
+      # Version index.js/index.wasm by commit (why: web/stamp.sh).
+      - name: Stamp the build
+        run: web/stamp.sh zig-out/web "${GITHUB_SHA::8}"
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: zig-out/web

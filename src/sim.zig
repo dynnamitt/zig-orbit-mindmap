@@ -80,11 +80,15 @@ fn dot(a: Vec3, b: Vec3) f32 {
     return @reduce(.Add, a * b);
 }
 
-fn length(a: Vec3) f32 {
+pub fn length(a: Vec3) f32 {
     return @sqrt(dot(a, a));
 }
 
-fn cross(a: Vec3, b: Vec3) Vec3 {
+pub fn normalize(a: Vec3) Vec3 {
+    return a / splat(length(a));
+}
+
+pub fn cross(a: Vec3, b: Vec3) Vec3 {
     return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
 }
 
@@ -137,6 +141,12 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
+/// Tag: the mother star (the IPO's process). Her children hang on cords;
+/// planets are her inputs.
+pub const Mother = struct {};
+/// Relationship `(InputOf, mother)`: a planet feeds this mother star. It
+/// only links them (for drawing and labels); gravity comes from every star.
+pub const InputOf = struct {};
 
 // zflecs declares ecs_set_id as returning entity_t, but flecs 4.1 returns void.
 // Native ABIs ignore the bogus return value; on wasm, wasm-ld replaces the call
@@ -152,6 +162,13 @@ fn setPair(world: *ecs.world_t, entity: ecs.entity_t, comptime T: type, target: 
     ecs_set_id(world, entity, ecs.pair(ecs.id(T), target), @sizeOf(T), &val);
 }
 
+/// Target of the pair matched by a `(Rel, Wildcard)` term. pair_second keeps
+/// only the id's low 32 bits; get_alive restores the generation, or a target
+/// on a recycled id would never match its entity.
+pub fn pairTarget(it: *ecs.iter_t, index: i8) ecs.entity_t {
+    return ecs.get_alive(it.world, ecs.pair_second(ecs.field_id(it, index)));
+}
+
 /// Registers components and systems on `world`.
 pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, Position);
@@ -164,6 +181,8 @@ pub fn register(world: *ecs.world_t) void {
     ecs.TAG(world, Barycenter);
     ecs.COMPONENT(world, StarField);
     ecs.TAG(world, Planet);
+    ecs.TAG(world, Mother);
+    ecs.TAG(world, InputOf);
     // Before any star exists: system terms on singletons need them to match.
     set(world, ecs.id(StarField), StarField, .{});
     set(world, ecs.id(Barycenter), Position, .{ .v = splat(0) });
@@ -247,9 +266,7 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
     var n: usize = 0;
     while (ecs.iter_next(it)) {
         const cords = ecs.field(it, Cord, cluster_cord);
-        // pair_second keeps only the id's low 32 bits; get_alive restores the
-        // generation, or a mother on a recycled id would never match.
-        const mother = if (cords != null) ecs.get_alive(it.world, ecs.pair_second(ecs.field_id(it, cluster_cord))) else 0;
+        const mother = if (cords != null) pairTarget(it, cluster_cord) else 0;
         const homes = ecs.field(it, Home, cluster_home);
         const ps = ecs.field(it, Position, cluster_pos).?;
         const vs = ecs.field(it, Velocity, cluster_vel).?;
@@ -464,10 +481,66 @@ pub const OrbitCam = struct {
         self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), self.min_distance, self.max_distance);
     }
 
+    /// Two-finger pinch: the fingers are now `ratio` times as far apart as
+    /// before, so the view zooms in by that ratio.
+    pub fn pinch(self: *OrbitCam, ratio: f32) void {
+        if (!(ratio > 0)) return; // also skips NaN
+        self.distance = std.math.clamp(self.distance / ratio, self.min_distance, self.max_distance);
+    }
+
     /// Camera position.
     pub fn eye(self: OrbitCam) Vec3 {
         const flat = @cos(self.pitch);
         return self.target + splat(self.distance) * Vec3{ flat * @sin(self.yaw), @sin(self.pitch), flat * @cos(self.yaw) };
+    }
+};
+
+/// What one frame of pointer input does to the camera.
+pub const Gesture = union(enum) {
+    none,
+    /// Turn by this many pixels.
+    drag: [2]f32,
+    /// Zoom by this ratio of finger spans (`OrbitCam.pinch`).
+    pinch: f32,
+};
+
+/// One finger, as the platform reports it.
+pub const Touch = struct { id: i32, x: f32, y: f32 };
+
+/// Turns raw pointer input into gestures: the left mouse button or one
+/// finger drags, two fingers pinch. Fingers are followed by id, frame to
+/// frame: a finger that just landed, or a pair that just changed (a finger
+/// lifted or joined), does nothing until it moves on from there. Positions
+/// are never compared across different fingers, so the camera never jumps.
+pub const TouchSteer = struct {
+    /// Fingers down last frame (the first two).
+    before: [2]Touch = undefined,
+    n_before: usize = 0,
+
+    /// One frame: `touches` down now (raylib keeps the first ones), the left
+    /// button and the mouse's movement.
+    pub fn update(self: *TouchSteer, touches: []const Touch, mouse_down: bool, mouse_delta: [2]f32) Gesture {
+        const n = @min(touches.len, 2);
+        defer {
+            @memcpy(self.before[0..n], touches[0..n]);
+            self.n_before = n;
+        }
+        if (mouse_down) return .{ .drag = mouse_delta };
+        if (n == 1 and self.n_before == 1 and touches[0].id == self.before[0].id)
+            return .{ .drag = .{ touches[0].x - self.before[0].x, touches[0].y - self.before[0].y } };
+        if (n == 2 and self.n_before == 2 and samePair(touches[0..2], &self.before)) {
+            const was = span(self.before[0], self.before[1]);
+            if (was > 0) return .{ .pinch = span(touches[0], touches[1]) / was };
+        }
+        return .none;
+    }
+
+    fn samePair(a: []const Touch, b: []const Touch) bool {
+        return (a[0].id == b[0].id and a[1].id == b[1].id) or (a[0].id == b[1].id and a[1].id == b[0].id);
+    }
+
+    fn span(a: Touch, b: Touch) f32 {
+        return std.math.hypot(a.x - b.x, a.y - b.y);
     }
 };
 
@@ -481,6 +554,7 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     var c: Cluster = undefined;
     var f: StarField = .{ .n = 1 + child_stretch.len };
     c.mother = spawnStar(world, at, mother_mass, mother_radius, mother_white);
+    ecs.add(world, c.mother, Mother);
     set(world, c.mother, Home, .{ .v = at });
     f.pos[0] = at;
     f.mass[0] = mother_mass;
@@ -502,14 +576,14 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
 }
 
 /// The planets of `planet_starts`, around the current barycenter (so spawn
-/// the cluster first).
-pub fn spawnPlanets(world: *ecs.world_t) [planet_starts.len]ecs.entity_t {
+/// the cluster first), each an input of `mother`.
+pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t) [planet_starts.len]ecs.entity_t {
     var out: [planet_starts.len]ecs.entity_t = undefined;
-    for (&out, planet_starts) |*e, start| e.* = spawnPlanet(world, start);
+    for (&out, planet_starts) |*e, start| e.* = spawnPlanet(world, mother, start);
     return out;
 }
 
-fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
+fn spawnPlanet(world: *ecs.world_t, mother: ecs.entity_t, start: PlanetStart) ecs.entity_t {
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     // Flat orbit first: outward and counter-clockwise (seen from above)
     // directions at `phase`. Then tilt both about the node line.
@@ -529,6 +603,7 @@ fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
     // Plus the barycenter's own drift, so the orbit is circular around it.
     set(world, e, Velocity, .{ .v = f.drift + rotate(along, node, start.tilt) * splat(speed) });
     ecs.add(world, e, Planet);
+    ecs.add_pair(world, e, ecs.id(InputOf), mother);
     set(world, e, Ball, .{ .radius = start.radius, .rgba = start.rgba });
     return e;
 }
@@ -550,15 +625,42 @@ fn spawnStar(world: *ecs.world_t, at: Vec3, mass: f32, radius: f32, rgba: u32) e
     return e;
 }
 
-/// Query over every drawable entity: term 0 = `Position`, term 1 = `Ball`,
-/// term 2 = optional `PrevPosition` (null field for static entities).
+/// Query over every `(Rel, mother)` link to draw: term 0 = `Position`,
+/// term 1 = optional `PrevPosition`, term 2 = the pair (target via
+/// `pairTarget(it, 2)`). Rel is `Cord` (child stars) or `InputOf` (planets).
+/// Caller owns it (`ecs.query_fini`).
+pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
+    return ecs.query_init(world, &.{
+        .terms = [_]ecs.term_t{
+            .{ .id = ecs.id(Position) },
+            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.pair(ecs.id(Rel), ecs.Wildcard) },
+        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
+    });
+}
+
+/// Query over every mother star: term 0 = `Position`, term 1 = optional
+/// `PrevPosition`, term 2 = `Ball`. Caller owns it (`ecs.query_fini`).
+pub fn motherQuery(world: *ecs.world_t) !*ecs.query_t {
+    return ecs.query_init(world, &.{
+        .terms = [_]ecs.term_t{
+            .{ .id = ecs.id(Position) },
+            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.id(Ball) },
+            .{ .id = ecs.id(Mother) },
+        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
+    });
+}
+
+/// Query over every drawable entity: term 0 = `Position`, term 1 = optional
+/// `PrevPosition` (null field for static entities), term 2 = `Ball`.
 /// Caller owns it (`ecs.query_fini`).
 pub fn ballQuery(world: *ecs.world_t) !*ecs.query_t {
     return ecs.query_init(world, &.{
         .terms = [_]ecs.term_t{
             .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(Ball) },
             .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.id(Ball) },
         } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
     });
 }
@@ -748,8 +850,8 @@ test "planets stay near their orbits and planes for two minutes" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
 
     for (0..2 * 60 * 60) |_| {
         step(world, 1);
@@ -792,8 +894,8 @@ test "planets start at the circular speed for the stars' pull" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
     const b = positionOf(world, ecs.id(Barycenter));
     for (ps, planet_starts) |e, start| {
         const d = positionOf(world, e) - b;
@@ -812,11 +914,11 @@ test "a planet spawned mid-wobble starts circular around the drifting barycenter
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const c = spawnCluster(world, .{ 0, 0, 0 });
     step(world, 200); // the barycenter is drifting by now
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     try expect(length(f.drift) > 1e-3);
-    const p = spawnPlanets(world)[0];
+    const p = spawnPlanets(world, c.mother)[0];
     const d = positionOf(world, p) - f.center;
     // No radial motion relative to the barycenter.
     try expectApproxEqAbs(@as(f32, 0), dot(ecs.get(world, p, Velocity).?.v - f.drift, d), 1e-2);
@@ -837,8 +939,8 @@ test "orbits survive a 3 s frame stall" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
 
     var clock: FixedClock = .{};
     step(world, 30);
@@ -857,8 +959,8 @@ test "snapshot keeps the position from before the step" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const p = spawnPlanets(world)[0];
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const p = spawnPlanets(world, c.mother)[0];
 
     step(world, 10);
     const before = positionOf(world, p);
@@ -871,8 +973,8 @@ test "ballQuery yields every star and planet, all moving" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    _ = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    _ = spawnPlanets(world, c.mother);
 
     const q = try ballQuery(world);
     defer ecs.query_fini(q);
@@ -881,7 +983,7 @@ test "ballQuery yields every star and planet, all moving" {
     var it = ecs.query_iter(world, q);
     while (ecs.query_next(&it)) {
         n += it.count();
-        if (ecs.field(&it, PrevPosition, 2) != null) with_prev += it.count();
+        if (ecs.field(&it, PrevPosition, 1) != null) with_prev += it.count();
     }
     const total = 1 + child_stretch.len + planet_starts.len;
     try expectEqual(total, n);
@@ -897,15 +999,91 @@ test "worker threads give the same result as one thread" {
         defer _ = ecs.fini(world);
         register(world);
         if (threads > 0) ecs.set_threads(world, threads);
-        _ = spawnCluster(world, .{ 0, 0, 0 });
+        const c = spawnCluster(world, .{ 0, 0, 0 });
         // Many planets, so pull splits across workers.
         var es: [planets]ecs.entity_t = undefined;
         for (&es, 0..) |*e, i| {
             const k: f32 = @floatFromInt(i);
-            e.* = spawnPlanet(world, .{ .r = 6 + k * 0.05, .phase = k, .node = k * 0.3, .tilt = 0.05, .radius = 0.1, .rgba = 0 });
+            e.* = spawnPlanet(world, c.mother, .{ .r = 6 + k * 0.05, .phase = k, .node = k * 0.3, .tilt = 0.05, .radius = 0.1, .rgba = 0 });
         }
         step(world, 600);
         for (out, es) |*p, e| p.* = positionOf(world, e);
     }
     try expectEqualSlices(Vec3, &runs[0], &runs[1]);
+}
+
+test "OrbitCam: pinch zooms by the finger-distance ratio, within limits" {
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
+    const start = cam.distance;
+    cam.pinch(2); // fingers spread to twice as far apart
+    try expectApproxEqAbs(start / 2, cam.distance, 1e-4);
+    cam.pinch(0.5);
+    try expectApproxEqAbs(start, cam.distance, 1e-4);
+    cam.pinch(1e6);
+    try expectEqual(cam.min_distance, cam.distance);
+    cam.pinch(0); // a degenerate gesture changes nothing
+    try expectEqual(cam.min_distance, cam.distance);
+}
+
+test "links: children hang on the mother by cords, planets are her inputs" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
+    const mq = try motherQuery(world);
+    defer ecs.query_fini(mq);
+    var mothers: usize = 0;
+    var mother_ok = true;
+    var mit = ecs.query_iter(world, mq);
+    while (ecs.query_next(&mit)) {
+        for (mit.entities()) |e| mother_ok = mother_ok and e == c.mother;
+        mothers += mit.count();
+    }
+    try expect(mother_ok);
+    try expectEqual(@as(usize, 1), mothers);
+
+    const cords = try linkQuery(world, Cord);
+    defer ecs.query_fini(cords);
+    const inputs = try linkQuery(world, InputOf);
+    defer ecs.query_fini(inputs);
+    for ([_]*ecs.query_t{ cords, inputs }, [_]usize{ c.children.len, ps.len }) |q, want| {
+        // Collect first, check after: a failed check mid-iteration would
+        // leave the iterator unfinished.
+        var n: usize = 0;
+        var targets_ok = true;
+        var it = ecs.query_iter(world, q);
+        while (ecs.query_next(&it)) {
+            targets_ok = targets_ok and pairTarget(&it, 2) == c.mother and ecs.field(&it, PrevPosition, 1) != null;
+            n += it.count();
+        }
+        try expect(targets_ok);
+        try expectEqual(want, n);
+    }
+}
+
+test "TouchSteer: a finger drags by its own movement, from its second frame" {
+    var t: TouchSteer = .{};
+    const none: []const Touch = &.{};
+    try expectEqual(Gesture.none, t.update(none, false, .{ 5, 5 }));
+    try expectEqual(Gesture{ .drag = .{ 5, 5 } }, t.update(none, true, .{ 5, 5 }));
+    try expectEqual(Gesture.none, t.update(&.{.{ .id = 7, .x = 100, .y = 100 }}, false, .{ 0, 0 })); // lands
+    try expectEqual(Gesture{ .drag = .{ 3, -2 } }, t.update(&.{.{ .id = 7, .x = 103, .y = 98 }}, false, .{ 0, 0 }));
+    // A stuck count (the finger gone, its last point still reported) is no drag.
+    try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{.{ .id = 7, .x = 103, .y = 98 }}, false, .{ 9, 9 }));
+    // A new finger in the slot: its jump from the old one is no drag.
+    try expectEqual(Gesture.none, t.update(&.{.{ .id = 8, .x = 400, .y = 10 }}, false, .{ 0, 0 }));
+}
+
+test "TouchSteer: pinch only within the same pair of fingers" {
+    var t: TouchSteer = .{};
+    const a: Touch = .{ .id = 1, .x = 0, .y = 0 };
+    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 2, .x = 100, .y = 0 } }, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(&.{ a, .{ .id = 2, .x = 150, .y = 0 } }, false, .{ 0, 0 }));
+    // Finger 2 lifts and finger 3 slides into its slot: no 4x zoom jump.
+    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 3, .x = 600, .y = 0 } }, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .pinch = 0.5 }, t.update(&.{ a, .{ .id = 3, .x = 300, .y = 0 } }, false, .{ 0, 0 }));
+    // Down to one finger: it waits a frame before dragging.
+    try expectEqual(Gesture.none, t.update(&.{a}, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{a}, false, .{ 0, 0 }));
 }
