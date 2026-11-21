@@ -11,18 +11,10 @@ const height = 450;
 const background = 0x0E1414FF; // near-black teal
 const orbit_guide = 0x1E5252FF; // deep teal
 
-const orbit_radius = 150;
+// World units; the default `sim.OrbitCam` frames this orbit.
+const orbit_radius = 5;
 const orbit_period = 4; // seconds
-// Newcomers: `config.newcomers` balls (zig build -Dnewcomers=N) enter from
-// random angles, between `newcomer_max_dist - newcomer_jitter` and
-// `newcomer_max_dist` from the attractor, all beyond the corners of the canvas.
-const newcomer_max_dist = 600;
-const newcomer_jitter = 100;
-comptime {
-    std.debug.assert(newcomer_max_dist - newcomer_jitter > std.math.hypot(@as(f32, width), height) / 2 + sim.newcomer_radius);
-    // Captured newcomers stay on the canvas.
-    std.debug.assert(orbit_radius * sim.newcomer_orbit_max + sim.newcomer_radius < height / 2);
-}
+const fovy = 45; // degrees, vertical
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -74,6 +66,7 @@ const EmscriptenPages = struct {
 var world: *ecs.world_t = undefined;
 var demo: sim.Demo = undefined;
 var balls: *ecs.query_t = undefined;
+var cam: sim.OrbitCam = .{};
 var clock: sim.FixedClock = .{};
 var stats: sim.FrameStats = .{};
 
@@ -85,11 +78,7 @@ pub fn main() !void {
     defer _ = ecs.fini(world);
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
-    demo = sim.spawnDemo(world, width / 2, height / 2, orbit_radius, orbit_period);
-    // raylib seeds its RNG from the clock in initWindow.
-    // max - 1: raylib computes max - min + 1, which overflows (a UBSan trap) at maxInt.
-    var prng = std.Random.DefaultPrng.init(@intCast(rl.getRandomValue(0, std.math.maxInt(i32) - 1)));
-    sim.spawnNewcomers(world, demo, prng.random(), config.newcomers, newcomer_max_dist, newcomer_jitter);
+    demo = sim.spawnDemo(world, .{ 0, 0, 0 }, orbit_radius, orbit_period);
 
     balls = try sim.ballQuery(world);
     defer ecs.query_fini(balls);
@@ -113,14 +102,29 @@ fn frame() callconv(.c) void {
     for (0..clock.advance(rl.getFrameTime())) |_| _ = ecs.progress(world, sim.step_dt);
     const alpha = clock.alpha();
 
+    // Drag with the left button to turn the camera, wheel to zoom.
+    if (rl.isMouseButtonDown(.left)) {
+        const d = rl.getMouseDelta();
+        cam.drag(d.x, d.y);
+    }
+    cam.zoom(rl.getMouseWheelMove());
+    cam.target = ecs.get(world, demo.center, sim.Position).?.v;
+
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
 
-    // Orbit guide, then every Position + Ball entity.
-    const c = ecs.get(world, demo.center, sim.Position).?;
-    rl.drawCircleLinesV(.{ .x = c.x, .y = c.y }, demo.radius, rl.getColor(orbit_guide));
+    rl.beginMode3D(.{
+        .position = vec3(cam.eye()),
+        .target = vec3(cam.target),
+        .up = .{ .x = 0, .y = 1, .z = 0 },
+        .fovy = fovy,
+        .projection = .perspective,
+    });
+    // Orbit guide: raylib's circle lies in the xy plane; tip it into xz.
+    rl.drawCircle3D(vec3(cam.target), demo.radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
 
+    // Every Position + Ball entity.
     var it = ecs.query_iter(world, balls);
     while (ecs.query_next(&it)) {
         const ps = ecs.field(&it, sim.Position, 0).?;
@@ -129,13 +133,11 @@ fn frame() callconv(.c) void {
         for (ps, bs, 0..) |p, b, i| {
             // Draw between the last two steps, so motion stays smooth when
             // frames don't line up with steps (rAF jitter, 120/144 Hz screens).
-            const at: rl.Vector2 = if (prevs) |pp|
-                .{ .x = std.math.lerp(pp[i].x, p.x, alpha), .y = std.math.lerp(pp[i].y, p.y, alpha) }
-            else
-                .{ .x = p.x, .y = p.y };
-            rl.drawCircleV(at, b.radius, rl.getColor(b.rgba));
+            const at = if (prevs) |pp| pp[i].v + (p.v - pp[i].v) * sim.splat(alpha) else p.v;
+            rl.drawSphere(vec3(at), b.radius, rl.getColor(b.rgba));
         }
     }
+    rl.endMode3D();
 
     // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
     // last draw batch first so it counts. GPU time isn't measured (GL runs
@@ -148,6 +150,10 @@ fn frame() callconv(.c) void {
     var buf: [stats_buf_len]u8 = undefined;
     drawStat(std.fmt.bufPrintSentinel(&buf, "{d} FPS", .{rl.getFPS()}, 0) catch unreachable, 0);
     drawStat(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
+}
+
+fn vec3(v: sim.Vec3) rl.Vector3 {
+    return .{ .x = v[0], .y = v[1], .z = v[2] };
 }
 
 // rlgl, part of the raylib library; raylib-zig doesn't export it as a module.

@@ -6,8 +6,6 @@ const zflecs = @import("zflecs");
 // emscripten's default 64 KiB stack overflows in Debug web builds (zig + flecs
 // frames); release builds don't check, so an overflow there corrupts memory.
 const web_stack_size = "1048576";
-// Newcomer balls when -Dnewcomers isn't given; Pages and CI ship this.
-const default_newcomers = 42;
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -57,9 +55,7 @@ pub fn build(b: *std.Build) !void {
     exe_mod.linkLibrary(raylib_dep.artifact("raylib"));
     exe_mod.addImport("zflecs", zflecs_dep.module("root"));
     exe_mod.addImport("sim", sim_mod);
-    // Load test: zig build run -Dnewcomers=100000 -Dthreads=8
     const config = b.addOptions();
-    config.addOption(u32, "newcomers", b.option(u32, "newcomers", "Newcomer balls to spawn") orelse default_newcomers);
     const threads = b.option(u8, "threads", "Flecs worker threads (native only)") orelse 0;
     if (is_web and threads > 0) return error.ThreadsNotOnWeb; // wasm threads need COOP/COEP, which Pages can't send
     config.addOption(u8, "threads", threads);
