@@ -11,7 +11,8 @@
     body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
     h1 { margin: 0; font-size: 20px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
-    canvas { display: block; box-sizing: border-box; max-width: 100vw; height: auto;
+    /* touch-action: drags and pinches steer the camera, not the page. */
+    canvas { display: block; touch-action: none; box-sizing: border-box; max-width: 100vw; height: auto;
              border: 2px solid #2e7e7e; image-rendering: auto; }
     #status:empty { display: none; }
   </style>
@@ -24,6 +25,12 @@
     var started = false;
     var Module = {
       canvas: document.getElementById("canvas"),
+      // Fetch index.wasm with index.js's ?v= tag (web/stamp.sh), so a cached
+      // wasm from an older deploy is never paired with a newer index.js.
+      locateFile: function (path, prefix) {
+        var js = document.querySelector('script[src^="index.js"]');
+        return prefix + path + (js ? new URL(js.src).search : "");
+      },
       onRuntimeInitialized: function () { started = true; },
       setStatus: function (text) { document.getElementById("status").textContent = text; },
       print: function (text) { console.log(text); },

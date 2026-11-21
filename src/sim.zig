@@ -76,15 +76,15 @@ const stats_window = 0.5;
 /// A SIMD vector, so arithmetic is element-wise (`a + b`, `a * @as(Vec3, @splat(k))`).
 pub const Vec3 = @Vector(3, f32);
 
-fn dot(a: Vec3, b: Vec3) f32 {
+pub fn dot(a: Vec3, b: Vec3) f32 {
     return @reduce(.Add, a * b);
 }
 
-fn length(a: Vec3) f32 {
+pub fn length(a: Vec3) f32 {
     return @sqrt(dot(a, a));
 }
 
-fn cross(a: Vec3, b: Vec3) Vec3 {
+pub fn cross(a: Vec3, b: Vec3) Vec3 {
     return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
 }
 
@@ -137,6 +137,12 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
+/// Tag: the mother star (the IPO's process). Her children hang on cords;
+/// planets are her inputs.
+pub const Mother = struct {};
+/// Relationship `(InputOf, mother)`: a planet feeds this mother star. It
+/// only links them (for drawing and labels); gravity comes from every star.
+pub const InputOf = struct {};
 
 // zflecs declares ecs_set_id as returning entity_t, but flecs 4.1 returns void.
 // Native ABIs ignore the bogus return value; on wasm, wasm-ld replaces the call
@@ -152,6 +158,13 @@ fn setPair(world: *ecs.world_t, entity: ecs.entity_t, comptime T: type, target: 
     ecs_set_id(world, entity, ecs.pair(ecs.id(T), target), @sizeOf(T), &val);
 }
 
+/// Target of the pair matched by a `(Rel, Wildcard)` term. pair_second keeps
+/// only the id's low 32 bits; get_alive restores the generation, or a target
+/// on a recycled id would never match its entity.
+pub fn pairTarget(it: *ecs.iter_t, index: i8) ecs.entity_t {
+    return ecs.get_alive(it.world, ecs.pair_second(ecs.field_id(it, index)));
+}
+
 /// Registers components and systems on `world`.
 pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, Position);
@@ -164,6 +177,8 @@ pub fn register(world: *ecs.world_t) void {
     ecs.TAG(world, Barycenter);
     ecs.COMPONENT(world, StarField);
     ecs.TAG(world, Planet);
+    ecs.TAG(world, Mother);
+    ecs.TAG(world, InputOf);
     // Before any star exists: system terms on singletons need them to match.
     set(world, ecs.id(StarField), StarField, .{});
     set(world, ecs.id(Barycenter), Position, .{ .v = splat(0) });
@@ -247,9 +262,7 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
     var n: usize = 0;
     while (ecs.iter_next(it)) {
         const cords = ecs.field(it, Cord, cluster_cord);
-        // pair_second keeps only the id's low 32 bits; get_alive restores the
-        // generation, or a mother on a recycled id would never match.
-        const mother = if (cords != null) ecs.get_alive(it.world, ecs.pair_second(ecs.field_id(it, cluster_cord))) else 0;
+        const mother = if (cords != null) pairTarget(it, cluster_cord) else 0;
         const homes = ecs.field(it, Home, cluster_home);
         const ps = ecs.field(it, Position, cluster_pos).?;
         const vs = ecs.field(it, Velocity, cluster_vel).?;
@@ -464,6 +477,13 @@ pub const OrbitCam = struct {
         self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), self.min_distance, self.max_distance);
     }
 
+    /// Two-finger pinch: the fingers are now `ratio` times as far apart as
+    /// before, so the view zooms in by that ratio.
+    pub fn pinch(self: *OrbitCam, ratio: f32) void {
+        if (!(ratio > 0)) return; // also skips NaN
+        self.distance = std.math.clamp(self.distance / ratio, self.min_distance, self.max_distance);
+    }
+
     /// Camera position.
     pub fn eye(self: OrbitCam) Vec3 {
         const flat = @cos(self.pitch);
@@ -481,6 +501,7 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     var c: Cluster = undefined;
     var f: StarField = .{ .n = 1 + child_stretch.len };
     c.mother = spawnStar(world, at, mother_mass, mother_radius, mother_white);
+    ecs.add(world, c.mother, Mother);
     set(world, c.mother, Home, .{ .v = at });
     f.pos[0] = at;
     f.mass[0] = mother_mass;
@@ -502,14 +523,14 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
 }
 
 /// The planets of `planet_starts`, around the current barycenter (so spawn
-/// the cluster first).
-pub fn spawnPlanets(world: *ecs.world_t) [planet_starts.len]ecs.entity_t {
+/// the cluster first), each an input of `mother`.
+pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t) [planet_starts.len]ecs.entity_t {
     var out: [planet_starts.len]ecs.entity_t = undefined;
-    for (&out, planet_starts) |*e, start| e.* = spawnPlanet(world, start);
+    for (&out, planet_starts) |*e, start| e.* = spawnPlanet(world, mother, start);
     return out;
 }
 
-fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
+fn spawnPlanet(world: *ecs.world_t, mother: ecs.entity_t, start: PlanetStart) ecs.entity_t {
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     // Flat orbit first: outward and counter-clockwise (seen from above)
     // directions at `phase`. Then tilt both about the node line.
@@ -529,6 +550,7 @@ fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
     // Plus the barycenter's own drift, so the orbit is circular around it.
     set(world, e, Velocity, .{ .v = f.drift + rotate(along, node, start.tilt) * splat(speed) });
     ecs.add(world, e, Planet);
+    ecs.add_pair(world, e, ecs.id(InputOf), mother);
     set(world, e, Ball, .{ .radius = start.radius, .rgba = start.rgba });
     return e;
 }
@@ -548,6 +570,20 @@ fn spawnStar(world: *ecs.world_t, at: Vec3, mass: f32, radius: f32, rgba: u32) e
     set(world, e, Star, .{ .mass = mass });
     set(world, e, Ball, .{ .radius = radius, .rgba = rgba });
     return e;
+}
+
+/// Query over every `(Rel, mother)` link to draw: term 0 = `Position`,
+/// term 1 = optional `PrevPosition`, term 2 = the pair (target via
+/// `pairTarget(it, 2)`). Rel is `Cord` (child stars) or `InputOf` (planets).
+/// Caller owns it (`ecs.query_fini`).
+pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
+    return ecs.query_init(world, &.{
+        .terms = [_]ecs.term_t{
+            .{ .id = ecs.id(Position) },
+            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.pair(ecs.id(Rel), ecs.Wildcard) },
+        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
+    });
 }
 
 /// Query over every drawable entity: term 0 = `Position`, term 1 = `Ball`,
@@ -748,8 +784,8 @@ test "planets stay near their orbits and planes for two minutes" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
 
     for (0..2 * 60 * 60) |_| {
         step(world, 1);
@@ -792,8 +828,8 @@ test "planets start at the circular speed for the stars' pull" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
     const b = positionOf(world, ecs.id(Barycenter));
     for (ps, planet_starts) |e, start| {
         const d = positionOf(world, e) - b;
@@ -812,11 +848,11 @@ test "a planet spawned mid-wobble starts circular around the drifting barycenter
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const c = spawnCluster(world, .{ 0, 0, 0 });
     step(world, 200); // the barycenter is drifting by now
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     try expect(length(f.drift) > 1e-3);
-    const p = spawnPlanets(world)[0];
+    const p = spawnPlanets(world, c.mother)[0];
     const d = positionOf(world, p) - f.center;
     // No radial motion relative to the barycenter.
     try expectApproxEqAbs(@as(f32, 0), dot(ecs.get(world, p, Velocity).?.v - f.drift, d), 1e-2);
@@ -837,8 +873,8 @@ test "orbits survive a 3 s frame stall" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const ps = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
 
     var clock: FixedClock = .{};
     step(world, 30);
@@ -857,8 +893,8 @@ test "snapshot keeps the position from before the step" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    const p = spawnPlanets(world)[0];
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const p = spawnPlanets(world, c.mother)[0];
 
     step(world, 10);
     const before = positionOf(world, p);
@@ -871,8 +907,8 @@ test "ballQuery yields every star and planet, all moving" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
-    _ = spawnCluster(world, .{ 0, 0, 0 });
-    _ = spawnPlanets(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    _ = spawnPlanets(world, c.mother);
 
     const q = try ballQuery(world);
     defer ecs.query_fini(q);
@@ -897,15 +933,52 @@ test "worker threads give the same result as one thread" {
         defer _ = ecs.fini(world);
         register(world);
         if (threads > 0) ecs.set_threads(world, threads);
-        _ = spawnCluster(world, .{ 0, 0, 0 });
+        const c = spawnCluster(world, .{ 0, 0, 0 });
         // Many planets, so pull splits across workers.
         var es: [planets]ecs.entity_t = undefined;
         for (&es, 0..) |*e, i| {
             const k: f32 = @floatFromInt(i);
-            e.* = spawnPlanet(world, .{ .r = 6 + k * 0.05, .phase = k, .node = k * 0.3, .tilt = 0.05, .radius = 0.1, .rgba = 0 });
+            e.* = spawnPlanet(world, c.mother, .{ .r = 6 + k * 0.05, .phase = k, .node = k * 0.3, .tilt = 0.05, .radius = 0.1, .rgba = 0 });
         }
         step(world, 600);
         for (out, es) |*p, e| p.* = positionOf(world, e);
     }
     try expectEqualSlices(Vec3, &runs[0], &runs[1]);
+}
+
+test "OrbitCam: pinch zooms by the finger-distance ratio, within limits" {
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
+    const start = cam.distance;
+    cam.pinch(2); // fingers spread to twice as far apart
+    try expectApproxEqAbs(start / 2, cam.distance, 1e-4);
+    cam.pinch(0.5);
+    try expectApproxEqAbs(start, cam.distance, 1e-4);
+    cam.pinch(1e6);
+    try expectEqual(cam.min_distance, cam.distance);
+    cam.pinch(0); // a degenerate gesture changes nothing
+    try expectEqual(cam.min_distance, cam.distance);
+}
+
+test "links: children hang on the mother by cords, planets are her inputs" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const c = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world, c.mother);
+    try expect(ecs.has_id(world, c.mother, ecs.id(Mother)));
+
+    for ([_]struct { q: *ecs.query_t, n: usize }{
+        .{ .q = try linkQuery(world, Cord), .n = c.children.len },
+        .{ .q = try linkQuery(world, InputOf), .n = ps.len },
+    }) |link| {
+        defer ecs.query_fini(link.q);
+        var n: usize = 0;
+        var it = ecs.query_iter(world, link.q);
+        while (ecs.query_next(&it)) {
+            try expectEqual(c.mother, pairTarget(&it, 2));
+            try expect(ecs.field(&it, PrevPosition, 1) != null);
+            n += it.count();
+        }
+        try expectEqual(link.n, n);
+    }
 }
