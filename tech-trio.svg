@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="123.67587mm"
+   height="86.13942mm"
+   viewBox="0 0 123.67586 86.139421"
+   version="1.1"
+   id="svg5"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   sodipodi:docname="tech-trio.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview7"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:pageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:document-units="mm"
+     showgrid="false"
+     fit-margin-top="0"
+     fit-margin-left="0"
+     fit-margin-right="0"
+     fit-margin-bottom="0"
+     inkscape:zoom="2.061125"
+     inkscape:cx="259.56699"
+     inkscape:cy="213.23307"
+     inkscape:window-width="5120"
+     inkscape:window-height="1371"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1"
+     inkscape:showpageshadow="2"
+     inkscape:deskcolor="#d1d1d1" />
+  <defs
+     id="defs2" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(3.0320565,-34.510576)">
+    <rect
+       style="fill:none;stroke:#2e7e7e;stroke-width:4;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:5.11451;stroke-opacity:1"
+       id="rect846"
+       width="56.618782"
+       height="59.174019"
+       x="-33.595684"
+       y="57.58942"
+       transform="rotate(-30)" />
+    <rect
+       style="fill:none;stroke:#2e7e7e;stroke-width:4;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:5.11451;stroke-opacity:1"
+       id="rect846-6"
+       width="56.618782"
+       height="59.174019"
+       x="1.1450773"
+       y="76.599564"
+       transform="rotate(-30)" />
+    <rect
+       style="fill:none;stroke:#c8a878;stroke-width:4;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:5.11451;stroke-opacity:1"
+       id="rect846-6-8"
+       width="56.618782"
+       height="59.174019"
+       x="0.40532357"
+       y="75.926964"
+       transform="rotate(-30)" />
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:10.5833px;line-height:1.25;font-family:'agave Nerd Font Mono';-inkscape-font-specification:'agave Nerd Font Mono';fill:#1e5252;fill-opacity:1;stroke-width:0.264583"
+       x="60.968494"
+       y="28.212162"
+       id="text2896"
+       transform="rotate(60)"><tspan
+         sodipodi:role="line"
+         id="tspan2894"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'agave Nerd Font Mono';-inkscape-font-specification:'agave Nerd Font Mono';fill:#1e5252;fill-opacity:1;stroke-width:0.264583"
+         x="60.968494"
+         y="28.212162">raylib</tspan></text>
+    <g
+       id="g1-2-0"
+       transform="rotate(-120,93.828383,48.856752)"
+       style="fill:#c87137">
+      <rect
+         style="display:none;fill:#c87137;fill-opacity:1;stroke:#6b3a08;stroke-width:0;stroke-dasharray:none;stroke-opacity:1"
+         id="rect1-9-9"
+         width="20.495811"
+         height="15.592617"
+         x="76.009857"
+         y="-3.6143534" />
+      <text
+         xml:space="preserve"
+         style="font-size:14.6259px;line-height:1.25;font-family:Amiga;-inkscape-font-specification:Amiga;fill:#c87137;fill-opacity:1;stroke-width:0.171397"
+         x="75.288338"
+         y="8.3990421"
+         id="text7572-1-3"><tspan
+           sodipodi:role="line"
+           id="tspan7570-2-6"
+           style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:14.6259px;font-family:'agave Nerd Font Mono';-inkscape-font-specification:'agave Nerd Font Mono';fill:#c87137;fill-opacity:1;stroke-width:0.171397"
+           x="75.288338"
+           y="8.3990421">[<tspan
+   style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-family:'agave Nerd Font Mono';-inkscape-font-specification:'agave Nerd Font Mono Bold';fill:#c87137"
+   id="tspan1">Z</tspan>]</tspan></text>
+    </g>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:13.9802px;line-height:1.25;font-family:Amiga;-inkscape-font-specification:'Amiga Bold';fill:#1e5252;fill-opacity:1;stroke-width:0.16383"
+       x="98.337257"
+       y="-41.375637"
+       id="text25447"
+       transform="rotate(60)"><tspan
+         sodipodi:role="line"
+         id="tspan25445"
+         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:13.9802px;font-family:Amiga;-inkscape-font-specification:'Amiga Bold';fill:#1e5252;fill-opacity:1;stroke-width:0.16383"
+         x="98.337257"
+         y="-41.375637">flëcs</tspan></text>
+  </g>
+</svg>

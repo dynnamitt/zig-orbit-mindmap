@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      # raylib's GLFW backend compiles against X11 + GL headers.
+      - name: Install X11/GL dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libgl-dev
+
+      - name: Format check
+        run: zig fmt --check build.zig build.zig.zon src
+
+      - name: Unit tests (headless)
+        run: zig build test --summary all
+
+      - name: Build app
+        run: zig build --summary all
+
+      # The template's rename must leave a buildable package, the right Pages
+      # URL and no old names. The repo name contains the template name on
+      # purpose: the URL must keep it. Skipped in repos made from the
+      # template: the script deletes itself.
+      - name: Template rename check
+        if: hashFiles('runme1st.sh') != ''
+        run: |
+          git remote set-url origin https://github.com/CI-Owner/zig-rayflecs-ci.git
+          ./runme1st.sh ci-game
+          url=ci-owner.github.io/zig-rayflecs-ci/
+          grep -q "$url" README.md
+          if git grep -nI -e zig-rayflecs -e zig_rayflecs -- . ':!.github' | grep -v "$url"; then exit 1; fi
+          zig build test --summary all
+          zig build --summary all
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      # Cache the installed Emscripten SDK. Its location is the emsdk package
+      # hash; which SDK version gets installed is pinned by raylib (via
+      # raylib_zig), so key on both and nothing else in build.zig.zon.
+      - name: Emscripten SDK cache key
+        id: emsdk
+        run: |
+          pkg=$(sed -n '/\.emsdk = /,/}/ s/.*\.hash = "\([^"]*\)".*/\1/p' build.zig.zon)
+          rl=$(sed -n '/\.raylib_zig = /,/}/ s/.*\.hash = "\([^"]*\)".*/\1/p' build.zig.zon)
+          test -n "$pkg" && test -n "$rl"
+          echo "path=zig-pkg/$pkg" >> "$GITHUB_OUTPUT"
+          echo "key=emsdk-$pkg-$rl" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.emsdk.outputs.path }}
+          key: ${{ steps.emsdk.outputs.key }}
+
+      # wasm-ld only warns on a C/Zig extern signature mismatch, then makes the
+      # call trap at runtime (zflecs' ecs_set_id did this), so fail on it here.
+      - name: Build for the browser
+        shell: bash
+        run: |
+          zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall --summary all 2>&1 | tee build.log
+          if grep -q 'signature mismatch' build.log; then
+            echo "::error::wasm-ld function signature mismatch (call traps on web)"
+            exit 1
+          fi
+
+      - name: Show output
+        run: ls -la zig-out/web
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: zig-out/web
