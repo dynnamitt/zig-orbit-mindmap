@@ -7,7 +7,6 @@ const ecs = @import("zflecs");
 // colours live in main.zig and web/shell.html.
 pub const orange: u32 = 0xC87137FF;
 pub const teal: u32 = 0x2E7E7EFF;
-pub const sand: u32 = 0xC8A878FF;
 
 // Demo ball sizes, as fractions of the orbit radius.
 const attractor_size = 0.16;
@@ -20,11 +19,11 @@ const stats_window = 0.5;
 /// A SIMD vector, so arithmetic is element-wise (`a + b`, `a * @as(Vec3, @splat(k))`).
 pub const Vec3 = @Vector(3, f32);
 
-pub fn dot(a: Vec3, b: Vec3) f32 {
+fn dot(a: Vec3, b: Vec3) f32 {
     return @reduce(.Add, a * b);
 }
 
-pub fn length(a: Vec3) f32 {
+fn length(a: Vec3) f32 {
     return @sqrt(dot(a, a));
 }
 
@@ -188,16 +187,32 @@ pub const OrbitCam = struct {
     yaw: f32 = 0,
     /// Height angle, radians; positive looks down from above.
     pitch: f32 = 0.5,
-    distance: f32 = 16,
+    distance: f32,
+    /// Zoom limits for `distance`.
+    min_distance: f32,
+    max_distance: f32,
 
     /// Radians per pixel of mouse drag.
-    pub const drag_speed = 0.005;
+    const drag_speed = 0.005;
     /// Distance scales by `exp(-zoom_speed)` per wheel notch.
-    pub const zoom_speed = 0.1;
+    const zoom_speed = 0.1;
     /// Just short of straight up or down, where the view's up vector flips.
-    pub const max_pitch = std.math.pi / 2.0 - 0.05;
-    pub const min_distance = 4;
-    pub const max_distance = 60;
+    const max_pitch = std.math.pi / 2.0 - 0.05;
+    // Distances, as multiples of the radius `framing` is given.
+    const frame_distance = 3.2;
+    const frame_min = 0.8;
+    const frame_max = 12;
+
+    /// A camera on `target` that fits a scene `radius` across in its default
+    /// view, and zooms from just outside it to far away.
+    pub fn framing(target: Vec3, radius: f32) OrbitCam {
+        return .{
+            .target = target,
+            .distance = radius * frame_distance,
+            .min_distance = radius * frame_min,
+            .max_distance = radius * frame_max,
+        };
+    }
 
     /// Mouse moved by (`dx`, `dy`) pixels with the button held: the scene
     /// follows the mouse sideways, and dragging down looks from higher up.
@@ -208,7 +223,7 @@ pub const OrbitCam = struct {
 
     /// `notches` of mouse wheel; positive zooms in.
     pub fn zoom(self: *OrbitCam, notches: f32) void {
-        self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), min_distance, max_distance);
+        self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), self.min_distance, self.max_distance);
     }
 
     /// Camera position.
@@ -218,8 +233,7 @@ pub const OrbitCam = struct {
     }
 };
 
-/// `speed` is the orbiter's (circular) orbital speed.
-pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t, radius: f32, speed: f32 };
+pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t };
 
 /// A static ball at `at` and a second ball circling it in the horizontal (xz)
 /// plane at `radius`, once every `period` seconds. Speed and pull are chosen
@@ -241,7 +255,7 @@ pub fn spawnDemo(world: *ecs.world_t, at: Vec3, radius: f32, period: f32) Demo {
     ecs.add_pair(world, orbiter, ecs.id(Orbits), center);
     set(world, orbiter, Ball, .{ .radius = radius * orbiter_size, .rgba = teal });
 
-    return .{ .center = center, .orbiter = orbiter, .radius = radius, .speed = speed };
+    return .{ .center = center, .orbiter = orbiter };
 }
 
 /// Query over every drawable entity: term 0 = `Position`, term 1 = `Ball`,
@@ -431,13 +445,14 @@ test "worker threads give the same result as one thread" {
         register(world);
         if (threads > 0) ecs.set_threads(world, threads);
         const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 4);
+        const speed = 2 * std.math.pi * 5.0 / 4.0;
         // Extra orbiters on tilted, widening paths, so work splits across workers.
         var es: [orbiters]ecs.entity_t = undefined;
         for (&es, 0..) |*e, i| {
             const k: f32 = @floatFromInt(i);
             e.* = ecs.new_id(world);
             set(world, e.*, Position, .{ .v = .{ 3 + k * 0.02, 0, 0 } });
-            set(world, e.*, Velocity, .{ .v = .{ 0, k * 0.01, -d.speed } });
+            set(world, e.*, Velocity, .{ .v = .{ 0, k * 0.01, -speed } });
             ecs.add_pair(world, e.*, ecs.id(Orbits), d.center);
         }
         step(world, 600);
@@ -463,17 +478,21 @@ test "a center without Attractor pulls nothing, even if its own center has one" 
 }
 
 test "OrbitCam: eye sits `distance` from the target, above it for positive pitch" {
-    const cam: OrbitCam = .{ .target = .{ 1, 2, 3 }, .yaw = 0.7, .pitch = 0.4, .distance = 10 };
+    var cam = OrbitCam.framing(.{ 1, 2, 3 }, 1);
+    cam.yaw = 0.7;
+    cam.pitch = 0.4;
+    cam.distance = 10;
     const e = cam.eye();
     try expectApproxEqAbs(@as(f32, 10), distance(e, cam.target), 1e-4);
     try expectApproxEqAbs(@as(f32, 2 + 10 * @sin(0.4)), e[1], 1e-4);
     // Default yaw and level pitch look from +z.
-    const level: OrbitCam = .{ .pitch = 0 };
+    var level = OrbitCam.framing(.{ 0, 0, 0 }, 1);
+    level.pitch = 0;
     try expect(distance(level.eye(), .{ 0, 0, level.distance }) < 1e-4);
 }
 
 test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
-    var cam: OrbitCam = .{};
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
     cam.drag(0, 1e6);
     try expectEqual(OrbitCam.max_pitch, cam.pitch);
     cam.drag(0, -1e6);
@@ -483,14 +502,14 @@ test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
 }
 
 test "OrbitCam: zoom moves in and out within its limits" {
-    var cam: OrbitCam = .{};
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
     const start = cam.distance;
     cam.zoom(1);
     try expect(cam.distance < start);
     cam.zoom(-2);
     try expect(cam.distance > start);
     cam.zoom(1000);
-    try expectEqual(@as(f32, OrbitCam.min_distance), cam.distance);
+    try expectEqual(cam.min_distance, cam.distance);
     cam.zoom(-1000);
-    try expectEqual(@as(f32, OrbitCam.max_distance), cam.distance);
+    try expectEqual(cam.max_distance, cam.distance);
 }

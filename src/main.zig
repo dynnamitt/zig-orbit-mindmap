@@ -10,8 +10,9 @@ const height = 450;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const orbit_guide = 0x1E5252FF; // deep teal
+const sand = 0xC8A878FF; // readout text
 
-// World units; the default `sim.OrbitCam` frames this orbit.
+// World units.
 const orbit_radius = 5;
 const orbit_period = 4; // seconds
 const fovy = 45; // degrees, vertical
@@ -66,7 +67,7 @@ const EmscriptenPages = struct {
 var world: *ecs.world_t = undefined;
 var demo: sim.Demo = undefined;
 var balls: *ecs.query_t = undefined;
-var cam: sim.OrbitCam = .{};
+var cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, orbit_radius);
 var clock: sim.FixedClock = .{};
 var stats: sim.FrameStats = .{};
 
@@ -108,7 +109,9 @@ fn frame() callconv(.c) void {
         cam.drag(d.x, d.y);
     }
     cam.zoom(rl.getMouseWheelMove());
-    cam.target = ecs.get(world, demo.center, sim.Position).?.v;
+    // Where the center is drawn, so the camera never jitters against it.
+    const center = drawnAt(ecs.get(world, demo.center, sim.Position).?.*, ecs.get(world, demo.center, sim.PrevPosition), alpha);
+    cam.target = center;
 
     rl.beginDrawing();
     defer rl.endDrawing();
@@ -122,7 +125,7 @@ fn frame() callconv(.c) void {
         .projection = .perspective,
     });
     // Orbit guide: raylib's circle lies in the xy plane; tip it into xz.
-    rl.drawCircle3D(vec3(cam.target), demo.radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
+    rl.drawCircle3D(vec3(center), orbit_radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
 
     // Every Position + Ball entity.
     var it = ecs.query_iter(world, balls);
@@ -131,9 +134,7 @@ fn frame() callconv(.c) void {
         const bs = ecs.field(&it, sim.Ball, 1).?;
         const prevs = ecs.field(&it, sim.PrevPosition, 2);
         for (ps, bs, 0..) |p, b, i| {
-            // Draw between the last two steps, so motion stays smooth when
-            // frames don't line up with steps (rAF jitter, 120/144 Hz screens).
-            const at = if (prevs) |pp| pp[i].v + (p.v - pp[i].v) * sim.splat(alpha) else p.v;
+            const at = drawnAt(p, if (prevs) |pp| &pp[i] else null, alpha);
             rl.drawSphere(vec3(at), b.radius, rl.getColor(b.rgba));
         }
     }
@@ -152,6 +153,14 @@ fn frame() callconv(.c) void {
     drawStat(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
 }
 
+/// Where to draw an entity: between its last two steps when it moves, so
+/// motion stays smooth when frames don't line up with steps (rAF jitter,
+/// 120/144 Hz screens).
+fn drawnAt(p: sim.Position, prev: ?*const sim.PrevPosition, alpha: f32) sim.Vec3 {
+    const pp = prev orelse return p.v;
+    return std.math.lerp(pp.v, p.v, sim.splat(alpha));
+}
+
 fn vec3(v: sim.Vec3) rl.Vector3 {
     return .{ .x = v[0], .y = v[1], .z = v[2] };
 }
@@ -162,5 +171,5 @@ extern fn rlDrawRenderBatchActive() void;
 /// One right-aligned readout line; `line` 0 is the top.
 fn drawStat(text: [:0]const u8, line: i32) void {
     const x = width - stats_margin - rl.measureText(text, stats_font_size);
-    rl.drawText(text, x, stats_margin + line * (stats_font_size + stats_line_gap), stats_font_size, rl.getColor(sim.sand));
+    rl.drawText(text, x, stats_margin + line * (stats_font_size + stats_line_gap), stats_font_size, rl.getColor(sand));
 }
