@@ -498,31 +498,49 @@ pub const OrbitCam = struct {
 /// What one frame of pointer input does to the camera.
 pub const Gesture = union(enum) {
     none,
-    /// Turn by this frame's mouse delta (raylib moves the mouse with one finger too).
-    drag,
+    /// Turn by this many pixels.
+    drag: [2]f32,
     /// Zoom by this ratio of finger spans (`OrbitCam.pinch`).
     pinch: f32,
 };
 
-/// Turns raw pointer input into gestures: left mouse button or one finger
-/// drags, two fingers pinch. Remembers the previous frame, so the frame a
-/// touch starts (or a pinch ends) is no drag: the mouse jumps to the finger
-/// then.
-pub const TouchSteer = struct {
-    touches_before: u32 = 0,
-    span_before: f32 = 0,
+/// One finger, as the platform reports it.
+pub const Touch = struct { id: i32, x: f32, y: f32 };
 
-    /// One frame: `touches` fingers down, `span` pixels between the first
-    /// two (ignored for fewer), `mouse_down` the left button.
-    pub fn update(self: *TouchSteer, touches: u32, span: f32, mouse_down: bool) Gesture {
-        defer self.touches_before = touches;
-        if (touches >= 2) {
-            defer self.span_before = span;
-            if (self.touches_before >= 2 and self.span_before > 0) return .{ .pinch = span / self.span_before };
-            return .none;
+/// Turns raw pointer input into gestures: the left mouse button or one
+/// finger drags, two fingers pinch. Fingers are followed by id, frame to
+/// frame: a finger that just landed, or a pair that just changed (a finger
+/// lifted or joined), does nothing until it moves on from there. Positions
+/// are never compared across different fingers, so the camera never jumps.
+pub const TouchSteer = struct {
+    /// Fingers down last frame (the first two).
+    before: [2]Touch = undefined,
+    n_before: usize = 0,
+
+    /// One frame: `touches` down now (raylib keeps the first ones), the left
+    /// button and the mouse's movement.
+    pub fn update(self: *TouchSteer, touches: []const Touch, mouse_down: bool, mouse_delta: [2]f32) Gesture {
+        const n = @min(touches.len, 2);
+        defer {
+            @memcpy(self.before[0..n], touches[0..n]);
+            self.n_before = n;
         }
-        if (touches == 1) return if (self.touches_before == 1) .drag else .none;
-        return if (mouse_down) .drag else .none;
+        if (mouse_down) return .{ .drag = mouse_delta };
+        if (n == 1 and self.n_before == 1 and touches[0].id == self.before[0].id)
+            return .{ .drag = .{ touches[0].x - self.before[0].x, touches[0].y - self.before[0].y } };
+        if (n == 2 and self.n_before == 2 and samePair(touches[0..2], &self.before)) {
+            const was = span(self.before[0], self.before[1]);
+            if (was > 0) return .{ .pinch = span(touches[0], touches[1]) / was };
+        }
+        return .none;
+    }
+
+    fn samePair(a: []const Touch, b: []const Touch) bool {
+        return (a[0].id == b[0].id and a[1].id == b[1].id) or (a[0].id == b[1].id and a[1].id == b[0].id);
+    }
+
+    fn span(a: Touch, b: Touch) f32 {
+        return std.math.hypot(a.x - b.x, a.y - b.y);
     }
 };
 
@@ -1015,43 +1033,57 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     const ps = spawnPlanets(world, c.mother);
     const mq = try motherQuery(world);
     defer ecs.query_fini(mq);
+    var mothers: usize = 0;
+    var mother_ok = true;
     var mit = ecs.query_iter(world, mq);
-    try expect(ecs.query_next(&mit));
-    try expectEqual(@as(usize, 1), mit.entities().len);
-    try expectEqual(c.mother, mit.entities()[0]);
-    while (ecs.query_next(&mit)) {} // finish the iterator
+    while (ecs.query_next(&mit)) {
+        for (mit.entities()) |e| mother_ok = mother_ok and e == c.mother;
+        mothers += mit.count();
+    }
+    try expect(mother_ok);
+    try expectEqual(@as(usize, 1), mothers);
 
-    for ([_]struct { q: *ecs.query_t, n: usize }{
-        .{ .q = try linkQuery(world, Cord), .n = c.children.len },
-        .{ .q = try linkQuery(world, InputOf), .n = ps.len },
-    }) |link| {
-        defer ecs.query_fini(link.q);
+    const cords = try linkQuery(world, Cord);
+    defer ecs.query_fini(cords);
+    const inputs = try linkQuery(world, InputOf);
+    defer ecs.query_fini(inputs);
+    for ([_]*ecs.query_t{ cords, inputs }, [_]usize{ c.children.len, ps.len }) |q, want| {
+        // Collect first, check after: a failed check mid-iteration would
+        // leave the iterator unfinished.
         var n: usize = 0;
-        var it = ecs.query_iter(world, link.q);
+        var targets_ok = true;
+        var it = ecs.query_iter(world, q);
         while (ecs.query_next(&it)) {
-            try expectEqual(c.mother, pairTarget(&it, 2));
-            try expect(ecs.field(&it, PrevPosition, 1) != null);
+            targets_ok = targets_ok and pairTarget(&it, 2) == c.mother and ecs.field(&it, PrevPosition, 1) != null;
             n += it.count();
         }
-        try expectEqual(link.n, n);
+        try expect(targets_ok);
+        try expectEqual(want, n);
     }
 }
 
-test "TouchSteer: a touch drags from its second frame, mouse drags at once" {
+test "TouchSteer: a finger drags by its own movement, from its second frame" {
     var t: TouchSteer = .{};
-    try expectEqual(Gesture.none, t.update(0, 0, false));
-    try expectEqual(Gesture.drag, t.update(0, 0, true));
-    try expectEqual(Gesture.none, t.update(1, 0, false)); // finger lands: the mouse jumps
-    try expectEqual(Gesture.drag, t.update(1, 0, false));
-    try expectEqual(Gesture.none, t.update(0, 0, false));
+    const none: []const Touch = &.{};
+    try expectEqual(Gesture.none, t.update(none, false, .{ 5, 5 }));
+    try expectEqual(Gesture{ .drag = .{ 5, 5 } }, t.update(none, true, .{ 5, 5 }));
+    try expectEqual(Gesture.none, t.update(&.{.{ .id = 7, .x = 100, .y = 100 }}, false, .{ 0, 0 })); // lands
+    try expectEqual(Gesture{ .drag = .{ 3, -2 } }, t.update(&.{.{ .id = 7, .x = 103, .y = 98 }}, false, .{ 0, 0 }));
+    // A stuck count (the finger gone, its last point still reported) is no drag.
+    try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{.{ .id = 7, .x = 103, .y = 98 }}, false, .{ 9, 9 }));
+    // A new finger in the slot: its jump from the old one is no drag.
+    try expectEqual(Gesture.none, t.update(&.{.{ .id = 8, .x = 400, .y = 10 }}, false, .{ 0, 0 }));
 }
 
-test "TouchSteer: two fingers pinch by span ratio; lifting one skips a frame" {
+test "TouchSteer: pinch only within the same pair of fingers" {
     var t: TouchSteer = .{};
-    try expectEqual(Gesture.none, t.update(2, 100, false)); // first frame: no span before
-    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(2, 150, false));
-    try expectEqual(Gesture.none, t.update(1, 0, false)); // one finger left: it may jump
-    try expectEqual(Gesture.drag, t.update(1, 0, false));
-    try expectEqual(Gesture.none, t.update(2, 0, false));
-    try expectEqual(Gesture.none, t.update(2, 80, false)); // span 0 before: no ratio
+    const a: Touch = .{ .id = 1, .x = 0, .y = 0 };
+    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 2, .x = 100, .y = 0 } }, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(&.{ a, .{ .id = 2, .x = 150, .y = 0 } }, false, .{ 0, 0 }));
+    // Finger 2 lifts and finger 3 slides into its slot: no 4x zoom jump.
+    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 3, .x = 600, .y = 0 } }, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .pinch = 0.5 }, t.update(&.{ a, .{ .id = 3, .x = 300, .y = 0 } }, false, .{ 0, 0 }));
+    // Down to one finger: it waits a frame before dragging.
+    try expectEqual(Gesture.none, t.update(&.{a}, false, .{ 0, 0 }));
+    try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{a}, false, .{ 0, 0 }));
 }

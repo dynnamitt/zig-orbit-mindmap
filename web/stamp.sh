@@ -6,6 +6,8 @@
 # Usage: web/stamp.sh <dir> <version>   (CI: zig-out/web "${GITHUB_SHA::8}")
 set -euo pipefail
 html=$1/index.html
+# The version goes into a sed replacement and a URL: keep it plain.
+[[ $2 =~ ^[A-Za-z0-9._-]+$ ]] || { echo "stamp.sh: version must match [A-Za-z0-9._-]+" >&2; exit 1; }
 # emcc writes the tag unquoted (src=index.js); accept quotes too. Only an
 # unstamped tag matches, so stamping twice fails instead of doubling ?v=.
 pattern='src="?index\.js"?([ >])'

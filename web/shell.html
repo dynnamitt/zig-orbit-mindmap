@@ -25,8 +25,10 @@
     var started = false;
     var Module = {
       canvas: document.getElementById("canvas"),
-      // Fetch index.wasm with index.js's ?v= tag (web/stamp.sh), so a cached
-      // wasm from an older deploy is never paired with a newer index.js.
+      // Fetch index.wasm with index.js's ?v= tag (web/stamp.sh), so the
+      // browser cache can't pair a new index.js with an old index.wasm.
+      // (Pages ignores the tag; an index.html cached across a deploy can
+      // still fetch mismatched files for up to its 10-minute max-age.)
       locateFile: function (path, prefix) {
         var js = document.querySelector('script[src^="index.js"]');
         return prefix + path + (js ? new URL(js.src).search : "");

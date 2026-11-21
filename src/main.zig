@@ -164,14 +164,16 @@ fn frame() callconv(.c) void {
 
 /// Mouse or one finger turns the camera, the wheel or two fingers zoom.
 fn steer() void {
-    const touches: u32 = @intCast(@max(0, rl.getTouchPointCount()));
-    const span = if (touches >= 2) rl.getTouchPosition(0).distance(rl.getTouchPosition(1)) else 0;
-    switch (touch.update(touches, span, rl.isMouseButtonDown(.left))) {
+    var touches: [2]sim.Touch = undefined;
+    const n: usize = @intCast(std.math.clamp(rl.getTouchPointCount(), 0, touches.len));
+    for (touches[0..n], 0..) |*t, i| {
+        const p = rl.getTouchPosition(@intCast(i));
+        t.* = .{ .id = rl.getTouchPointId(@intCast(i)), .x = p.x, .y = p.y };
+    }
+    const d = rl.getMouseDelta();
+    switch (touch.update(touches[0..n], rl.isMouseButtonDown(.left), .{ d.x, d.y })) {
         .none => {},
-        .drag => {
-            const d = rl.getMouseDelta();
-            cam.drag(d.x, d.y);
-        },
+        .drag => |by| cam.drag(by[0], by[1]),
         .pinch => |ratio| cam.pinch(ratio),
     }
     cam.zoom(rl.getMouseWheelMove());
@@ -215,9 +217,9 @@ fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
 /// A gray circle around a mother that always faces the camera.
 fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const r = ecs.field(it, sim.Ball, 2).?[i].radius * ring_scale;
-    const view = at - eye;
-    // The camera's pitch stays short of straight up or down, so view is never
-    // parallel to +y and the cross products are never zero.
+    // Axes from the camera's own view direction, which the pitch clamp keeps
+    // off vertical (the direction to the mother itself may not be).
+    const view = cam.target - eye;
     const right = sim.cross(view, .{ 0, 1, 0 });
     const u = sim.normalize(right) * sim.splat(r);
     const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
