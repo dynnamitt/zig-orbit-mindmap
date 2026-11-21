@@ -3,17 +3,9 @@
 const std = @import("std");
 const ecs = @import("zflecs");
 
-// Ball colours from the tech-trio.svg palette (0xRRGGBBAA); render-only
-// colours live in main.zig and web/shell.html.
-const orange: u32 = 0xC87137FF;
-const teal: u32 = 0x2E7E7EFF;
 // Star colours: the mother is the brightest (warm white), her children green.
 const mother_white: u32 = 0xFFF1D6FF;
 const child_green: u32 = 0x4FC27AFF;
-
-// Demo ball sizes, as fractions of the orbit radius.
-const attractor_size = 0.16;
-const orbiter_size = 0.066;
 
 // Star cluster (world units; masses only matter relative to each other). The
 // mother is slightly smaller than her children but heavier, and is held home
@@ -31,18 +23,51 @@ const home_k = 0.8;
 /// Pair push: `repel / (r² + repel_soft)`, soft so close passes stay gentle.
 const repel = 0.4;
 const repel_soft = 0.25;
-/// Children start this far off their rest length (fractions of it) and this
-/// high above the mother's plane, so the wobble starts uneven.
-const child_starts = [_]struct { stretch: f32, lift: f32 }{
-    .{ .stretch = 0.15, .lift = 0.3 },
-    .{ .stretch = -0.1, .lift = -0.25 },
-    .{ .stretch = 0.05, .lift = 0.1 },
-};
-const cluster_mass = mother_mass + child_mass * @as(f32, child_starts.len);
-/// Roughly how far the cluster reaches from its barycenter, for framing it.
-pub const cluster_radius = cord_rest + child_radius;
+/// Children start this far off their rest length (fractions of it), so the
+/// wobble starts uneven. They start level with the mother: a tilted cluster
+/// would slowly turn the planets' orbits about its own axis.
+const child_stretch = [_]f32{ 0.15, -0.1, 0.05 };
 /// Most stars the `cluster` system handles (it works on all of them at once).
 const max_stars = 16;
+
+// Planets (the IPO's inputs): every star pulls each one with g·mass/r²,
+// softened so a close pass stays finite. Each starts at the circular speed
+// for that pull, around the barycenter, on a plane tilted a few degrees off xz
+// about its own node line. The cluster is lumpy and wobbles, which would make
+// the orbits wander chaotically; damping their radial motion (relative to the
+// barycenter) settles them back toward circles, so they only drift a little.
+const g = 55.0;
+const planet_soft = 0.3;
+/// Per second: how fast radial motion (relative to the barycenter) is damped.
+const planet_settle = 0.1;
+const PlanetStart = struct {
+    /// Orbit radius around the barycenter.
+    r: f32,
+    /// Where on the orbit it starts, and the node line it tilts about
+    /// (radians around y, from +x toward -z).
+    phase: f32,
+    node: f32,
+    /// Plane tilt, radians.
+    tilt: f32,
+    radius: f32,
+    rgba: u32,
+};
+// Colours from the tech-trio.svg palette (teal, orange, sand, light gray) and
+// two lighter shades of the first two.
+const planet_starts = [_]PlanetStart{
+    .{ .r = 8.0, .phase = 0.0, .node = 0.0, .tilt = 0.06, .radius = 0.35, .rgba = 0x2E7E7EFF },
+    .{ .r = 9.2, .phase = 2.4, .node = 1.1, .tilt = -0.04, .radius = 0.3, .rgba = 0xC87137FF },
+    .{ .r = 10.4, .phase = 4.8, .node = 2.2, .tilt = 0.08, .radius = 0.4, .rgba = 0xC8A878FF },
+    .{ .r = 11.6, .phase = 0.9, .node = 3.3, .tilt = -0.07, .radius = 0.3, .rgba = 0xD1D1D1FF },
+    .{ .r = 12.8, .phase = 3.3, .node = 4.4, .tilt = 0.03, .radius = 0.45, .rgba = 0x5AA6A6FF },
+    .{ .r = 14.0, .phase = 5.7, .node = 5.5, .tilt = -0.05, .radius = 0.35, .rgba = 0xE0A070FF },
+};
+/// How far the planets reach from the barycenter at the start, for framing.
+pub const system_radius = blk: {
+    var r: f32 = 0;
+    for (planet_starts) |start| r = @max(r, start.r + start.radius);
+    break :blk r;
+};
 
 /// How long `FrameStats` collects (seconds) before it updates its readout.
 const stats_window = 0.5;
@@ -59,6 +84,22 @@ fn length(a: Vec3) f32 {
     return @sqrt(dot(a, a));
 }
 
+fn cross(a: Vec3, b: Vec3) Vec3 {
+    return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
+}
+
+/// Mass-weighted mean of `points` (positions or velocities); null when the
+/// masses sum to 0.
+fn massCenter(points: []const Vec3, masses: []const f32) ?Vec3 {
+    var sum = splat(0);
+    var total: f32 = 0;
+    for (points, masses) |p, m| {
+        sum += p * splat(m);
+        total += m;
+    }
+    return if (total > 0) sum / splat(total) else null;
+}
+
 pub fn splat(k: f32) Vec3 {
     return @splat(k);
 }
@@ -71,8 +112,6 @@ pub const PrevPosition = struct { v: Vec3 };
 /// Something to draw: a sphere. `rgba` is 0xRRGGBBAA so this module stays
 /// free of raylib types.
 pub const Ball = struct { radius: f32, rgba: u32 };
-/// Pulls `Orbits` entities toward it with acceleration `mu / r²`.
-pub const Attractor = struct { mu: f32 };
 /// A star: takes part in the cluster forces, weighted by `mass`.
 pub const Star = struct { mass: f32 };
 /// Relationship `(Cord, mother)`: a spring of `rest` length between this star
@@ -85,14 +124,19 @@ pub const Home = struct { v: Vec3 };
 /// mass-weighted center of all stars, and its `PrevPosition` (from `snapshot`,
 /// like any moving entity) lets rendering interpolate it.
 pub const Barycenter = struct {};
-/// Relationship `(Orbits, center)`: accelerates toward `center`, which must
-/// have `Position` + `Attractor`. As a pair, every orbiter of one center
-/// shares a table, so systems read the center once per table, not per entity.
-pub const Orbits = struct {};
-
-// Fields of the extra terms `register` appends after each system's own params.
-const gravity_center_pos = 3;
-const gravity_center_attractor = 4;
+/// Singleton on `ecs.id(StarField)`: every star's position and mass after the
+/// latest step (from `barycenter`, or `spawnCluster` before the first), so
+/// `pull` reads them without a query.
+pub const StarField = struct {
+    n: usize = 0,
+    pos: [max_stars]Vec3 = @splat(splat(0)),
+    mass: [max_stars]f32 = @splat(0),
+    /// The barycenter, and how fast it moves.
+    center: Vec3 = splat(0),
+    drift: Vec3 = splat(0),
+};
+/// Tag: a planet, pulled by every star.
+pub const Planet = struct {};
 
 // zflecs declares ecs_set_id as returning entity_t, but flecs 4.1 returns void.
 // Native ABIs ignore the bogus return value; on wasm, wasm-ld replaces the call
@@ -108,43 +152,26 @@ fn setPair(world: *ecs.world_t, entity: ecs.entity_t, comptime T: type, target: 
     ecs_set_id(world, entity, ecs.pair(ecs.id(T), target), @sizeOf(T), &val);
 }
 
-// `$center` binds the target of `(rel, $center)`; terms on it read that exact
-// entity. (An `up` traversal would be cached, but it climbs past a center that
-// lacks the component, e.g. to a moon's sun.)
-const center_var = "$center";
-
-/// Term matching the pair `(rel, $center)`.
-fn toCenter(comptime rel: type) ecs.term_t {
-    return .{ .first = .{ .id = ecs.id(rel) }, .second = .{ .name = center_var }, .inout = .In };
-}
-
-/// Term for `$center`'s `T`.
-fn onCenter(comptime T: type) ecs.term_t {
-    return .{ .id = ecs.id(T), .src = .{ .name = center_var }, .inout = .In };
-}
-
-/// A field the whole table shares (the center's): one value, not a slice.
-fn sharedField(it: *ecs.iter_t, comptime T: type, index: i8) T {
-    return ecs.field(it, T, index).?[0];
-}
-
 /// Registers components and systems on `world`.
 pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, Position);
     ecs.COMPONENT(world, Velocity);
     ecs.COMPONENT(world, PrevPosition);
     ecs.COMPONENT(world, Ball);
-    ecs.COMPONENT(world, Attractor);
-    ecs.TAG(world, Orbits);
     ecs.COMPONENT(world, Star);
     ecs.COMPONENT(world, Cord);
     ecs.COMPONENT(world, Home);
     ecs.TAG(world, Barycenter);
+    ecs.COMPONENT(world, StarField);
+    ecs.TAG(world, Planet);
+    // Before any star exists: system terms on singletons need them to match.
+    set(world, ecs.id(StarField), StarField, .{});
+    set(world, ecs.id(Barycenter), Position, .{ .v = splat(0) });
+    set(world, ecs.id(Barycenter), PrevPosition, .{ .v = splat(0) });
     addSystem(world, "snapshot", ecs.OnLoad, snapshot, &.{});
-    // gravity and cluster (PreUpdate) update velocity before move (OnUpdate)
+    // cluster and pull (PreUpdate) update velocity before move (OnUpdate)
     // uses it: semi-implicit Euler, which keeps orbits and springs from
     // gaining energy and spiralling out.
-    addSystem(world, "gravity", ecs.PreUpdate, gravity, &.{ toCenter(Orbits), onCenter(Position), onCenter(Attractor) });
     addRunSystem(world, "cluster", ecs.PreUpdate, cluster, &.{
         .{ .id = ecs.id(Position), .inout = .In },
         .{ .id = ecs.id(Velocity), .inout = .InOut },
@@ -152,12 +179,18 @@ pub fn register(world: *ecs.world_t) void {
         .{ .id = ecs.pair(ecs.id(Cord), ecs.Wildcard), .inout = .In, .oper = .Optional },
         .{ .id = ecs.id(Home), .inout = .In, .oper = .Optional },
     });
+    addSystem(world, "pull", ecs.PreUpdate, pull, &.{
+        .{ .id = ecs.id(Planet), .inout = .InOutNone },
+        .{ .id = ecs.id(StarField), .src = .{ .id = ecs.id(StarField) }, .inout = .In },
+    });
     addSystem(world, "move", ecs.OnUpdate, move, &.{});
-    // After move, so it describes the step just taken.
+    // After move, so it describes the step just taken (and the next pull).
     addRunSystem(world, "barycenter", ecs.PostUpdate, barycenter, &.{
         .{ .id = ecs.id(Position), .inout = .In },
+        .{ .id = ecs.id(Velocity), .inout = .In },
         .{ .id = ecs.id(Star), .inout = .In },
-        .{ .id = ecs.id(Position), .src = .{ .id = ecs.id(Barycenter) }, .inout = .InOut },
+        .{ .id = ecs.id(Position), .src = .{ .id = ecs.id(Barycenter) }, .inout = .Out },
+        .{ .id = ecs.id(StarField), .src = .{ .id = ecs.id(StarField) }, .inout = .Out },
     });
 }
 
@@ -183,28 +216,19 @@ fn snapshot(positions: []const Position, prevs: []PrevPosition) void {
     for (positions, prevs) |p, *prev| prev.* = .{ .v = p.v };
 }
 
-fn gravity(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity) void {
-    const dt = it.delta_time;
-    const c = sharedField(it, Position, gravity_center_pos);
-    const a = sharedField(it, Attractor, gravity_center_attractor);
-    for (positions, velocities) |p, *v| {
-        const d = c.v - p.v;
-        const r2 = dot(d, d);
-        if (r2 == 0) continue;
-        // a = mu / r² along d / r.
-        v.v += d * splat(a.mu / (r2 * @sqrt(r2)) * dt);
-    }
-}
-
 // Field indices of the `cluster` and `barycenter` terms in `register`.
 const cluster_pos = 0;
 const cluster_vel = 1;
 const cluster_star = 2;
 const cluster_cord = 3;
 const cluster_home = 4;
+// pull's extra terms come after its own two params.
+const pull_field = 3;
 const bary_pos = 0;
-const bary_star = 1;
-const bary_out = 2;
+const bary_vel = 1;
+const bary_star = 2;
+const bary_out = 3;
+const bary_field = 4;
 
 /// One star, as `cluster` gathers it.
 const Body = struct {
@@ -276,20 +300,59 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
     for (bs, acc[0..n]) |b, a| b.vel.* += a * splat(it.delta_time);
 }
 
-/// Mass-weighted center of the stars into the `Barycenter` singleton.
+/// Every star's pull on every planet.
+fn pull(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity) void {
+    const f = &ecs.field(it, StarField, pull_field).?[0];
+    const dt = it.delta_time;
+    for (positions, velocities) |p, *v| {
+        var a = fieldPull(f, p.v);
+        // Damp motion toward or away from the barycenter (relative to its
+        // own drift): purely radial, so it keeps angular momentum and
+        // settles the orbit toward a circle.
+        const out = p.v - f.center;
+        const r2 = dot(out, out);
+        if (r2 > 0) a -= out * splat(planet_settle * dot(v.v - f.drift, out) / r2);
+        v.v += a * splat(dt);
+    }
+}
+
+/// Acceleration every star in `f` gives a planet at `p`.
+fn fieldPull(f: *const StarField, p: Vec3) Vec3 {
+    var a = splat(0);
+    for (f.pos[0..f.n], f.mass[0..f.n]) |s, m| {
+        const d = s - p;
+        const r2 = dot(d, d) + planet_soft * planet_soft;
+        a += d * splat(g * m / (r2 * @sqrt(r2)));
+    }
+    return a;
+}
+
+/// The `StarField` (every star, the barycenter and its drift) and the
+/// barycenter entity's `Position`.
 fn barycenter(it: *ecs.iter_t) callconv(.c) void {
-    var sum = splat(0);
-    var total: f32 = 0;
-    var out: ?*Position = null;
+    var f: StarField = .{};
+    var vels: [max_stars]Vec3 = undefined;
+    var field: ?*StarField = null;
+    var center: ?*Position = null;
     while (ecs.iter_next(it)) {
-        out = &ecs.field(it, Position, bary_out).?[0];
-        for (ecs.field(it, Position, bary_pos).?, ecs.field(it, Star, bary_star).?) |p, s| {
-            sum += p.v * splat(s.mass);
-            total += s.mass;
+        field = &ecs.field(it, StarField, bary_field).?[0];
+        center = &ecs.field(it, Position, bary_out).?[0];
+        const ps = ecs.field(it, Position, bary_pos).?;
+        const vs = ecs.field(it, Velocity, bary_vel).?;
+        for (ps, vs, ecs.field(it, Star, bary_star).?) |p, v, s| {
+            if (f.n == max_stars) @panic("more stars than sim.max_stars");
+            f.pos[f.n] = p.v;
+            f.mass[f.n] = s.mass;
+            vels[f.n] = v.v;
+            f.n += 1;
         }
     }
-    const b = out orelse return;
-    if (total > 0) b.v = sum / splat(total);
+    if (f.n == 0) return;
+    // Massless stars: keep the last center rather than divide by zero.
+    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]) orelse field.?.center;
+    f.drift = massCenter(vels[0..f.n], f.mass[0..f.n]) orelse splat(0);
+    field.?.* = f;
+    center.?.v = f.center;
 }
 
 fn move(it: *ecs.iter_t, positions: []Position, velocities: []const Velocity) void {
@@ -302,7 +365,7 @@ fn move(it: *ecs.iter_t, positions: []Position, velocities: []const Velocity) vo
 pub const step_dt: f32 = 1.0 / 60.0;
 /// Most steps one frame may run. A longer frame (tab hidden, window dragged,
 /// debugger pause) drops the backlog instead of applying one huge `dt`, which
-/// would fling the orbiter out of orbit for good.
+/// would fling planets out of orbit and overstretch the cords.
 pub const max_steps_per_frame: u32 = 5;
 
 /// Turns variable frame times into a count of fixed `step_dt` steps.
@@ -370,13 +433,14 @@ pub const OrbitCam = struct {
     const zoom_speed = 0.1;
     /// Just short of straight up or down, where the view's up vector flips.
     const max_pitch = std.math.pi / 2.0 - 0.05;
-    // Distances, as multiples of the radius `framing` is given.
-    const frame_distance = 3.2;
-    const frame_min = 1.3;
-    const frame_max = 12;
+    // Distances, as multiples of the radius `framing` is given: at 45° fovy
+    // and 16:9, frame_distance just fits the radius across with some margin.
+    const frame_distance = 1.9;
+    const frame_min = 0.3;
+    const frame_max = 5;
 
     /// A camera on `target` that fits a scene `radius` across in its default
-    /// view, and zooms from just outside it to far away.
+    /// view, and zooms from close to the center to far away.
     pub fn framing(target: Vec3, radius: f32) OrbitCam {
         return .{
             .target = target,
@@ -407,54 +471,73 @@ pub const OrbitCam = struct {
     }
 };
 
-pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t };
-
-/// A static ball at `at` and a second ball circling it in the horizontal (xz)
-/// plane at `radius`, once every `period` seconds. Speed and pull are chosen
-/// so the orbit is an exact circle: v = 2πr/T, mu = v²·r.
-pub fn spawnDemo(world: *ecs.world_t, at: Vec3, radius: f32, period: f32) Demo {
-    const speed = 2 * std.math.pi * radius / period;
-
-    const center = ecs.new_id(world);
-    set(world, center, Position, .{ .v = at });
-    set(world, center, Attractor, .{ .mu = speed * speed * radius });
-    set(world, center, Ball, .{ .radius = radius * attractor_size, .rgba = orange });
-
-    const orbiter = ecs.new_id(world);
-    const start = at + Vec3{ radius, 0, 0 };
-    set(world, orbiter, Position, .{ .v = start });
-    set(world, orbiter, PrevPosition, .{ .v = start });
-    // Counter-clockwise seen from above (+y).
-    set(world, orbiter, Velocity, .{ .v = .{ 0, 0, -speed } });
-    ecs.add_pair(world, orbiter, ecs.id(Orbits), center);
-    set(world, orbiter, Ball, .{ .radius = radius * orbiter_size, .rgba = teal });
-
-    return .{ .center = center, .orbiter = orbiter };
-}
-
-pub const Cluster = struct { mother: ecs.entity_t, children: [child_starts.len]ecs.entity_t };
+pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]ecs.entity_t };
 
 /// The mother star at `at`, anchored there, and her children spread evenly
 /// around her on cords, each started a little off rest so the cluster wobbles.
-/// Also sets the `Barycenter` singleton.
+/// Also sets the `StarField` and `Barycenter` singletons for them, as the
+/// `barycenter` system will after each step.
 pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     var c: Cluster = undefined;
+    var f: StarField = .{ .n = 1 + child_stretch.len };
     c.mother = spawnStar(world, at, mother_mass, mother_radius, mother_white);
     set(world, c.mother, Home, .{ .v = at });
+    f.pos[0] = at;
+    f.mass[0] = mother_mass;
 
-    var sum = at * splat(mother_mass);
-    for (&c.children, child_starts, 0..) |*child, start, i| {
-        const angle = std.math.tau * @as(f32, @floatFromInt(i)) / child_starts.len;
-        const r = cord_rest * (1 + start.stretch);
-        const p = at + Vec3{ r * @cos(angle), start.lift, -r * @sin(angle) };
+    for (&c.children, child_stretch, 1..) |*child, stretch, i| {
+        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / child_stretch.len;
+        const r = cord_rest * (1 + stretch);
+        const p = at + Vec3{ r * @cos(angle), 0, -r * @sin(angle) };
         child.* = spawnStar(world, p, child_mass, child_radius, child_green);
         setPair(world, child.*, Cord, c.mother, .{ .rest = cord_rest });
-        sum += p * splat(child_mass);
+        f.pos[i] = p;
+        f.mass[i] = child_mass;
     }
-    const center = sum / splat(cluster_mass);
-    set(world, ecs.id(Barycenter), Position, .{ .v = center });
-    set(world, ecs.id(Barycenter), PrevPosition, .{ .v = center });
+    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]).?;
+    set(world, ecs.id(StarField), StarField, f);
+    set(world, ecs.id(Barycenter), Position, .{ .v = f.center });
+    set(world, ecs.id(Barycenter), PrevPosition, .{ .v = f.center });
     return c;
+}
+
+/// The planets of `planet_starts`, around the current barycenter (so spawn
+/// the cluster first).
+pub fn spawnPlanets(world: *ecs.world_t) [planet_starts.len]ecs.entity_t {
+    var out: [planet_starts.len]ecs.entity_t = undefined;
+    for (&out, planet_starts) |*e, start| e.* = spawnPlanet(world, start);
+    return out;
+}
+
+fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    // Flat orbit first: outward and counter-clockwise (seen from above)
+    // directions at `phase`. Then tilt both about the node line.
+    const out_dir = Vec3{ @cos(start.phase), 0, -@sin(start.phase) };
+    const along = Vec3{ -@sin(start.phase), 0, -@cos(start.phase) };
+    const node = Vec3{ @cos(start.node), 0, -@sin(start.node) };
+    const out = rotate(out_dir, node, start.tilt);
+    const p = f.center + out * splat(start.r);
+    // Circular speed for the stars' actual pull toward the center here: v²/r
+    // = inward pull. (The cluster is not a point: its ring of children pulls
+    // harder in its plane than the same mass at the barycenter would.)
+    const speed = @sqrt(@max(0, -dot(fieldPull(f, p), out)) * start.r);
+
+    const e = ecs.new_id(world);
+    set(world, e, Position, .{ .v = p });
+    set(world, e, PrevPosition, .{ .v = p });
+    // Plus the barycenter's own drift, so the orbit is circular around it.
+    set(world, e, Velocity, .{ .v = f.drift + rotate(along, node, start.tilt) * splat(speed) });
+    ecs.add(world, e, Planet);
+    set(world, e, Ball, .{ .radius = start.radius, .rgba = start.rgba });
+    return e;
+}
+
+/// `v` turned by `angle` radians about the unit `axis` (Rodrigues' formula).
+fn rotate(v: Vec3, axis: Vec3, angle: f32) Vec3 {
+    const c = @cos(angle);
+    const s = @sin(angle);
+    return v * splat(c) + cross(axis, v) * splat(s) + axis * splat(dot(axis, v) * (1 - c));
 }
 
 fn spawnStar(world: *ecs.world_t, at: Vec3, mass: f32, radius: f32, rgba: u32) ecs.entity_t {
@@ -526,46 +609,6 @@ test "entities without Velocity are not moved" {
     try expectEqual(Vec3{ 3, 7, -1 }, positionOf(world, e));
 }
 
-// Semi-implicit Euler keeps the orbit bounded but slightly elliptical: at
-// 120 steps per orbit the radius wobbles about ±3% and never drifts, and each
-// full period returns close to the start. The tests check exactly that.
-
-test "orbit radius stays bounded over many orbits, in its plane" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    for (0..10 * 120) |_| { // 10 orbits at 60 steps/s
-        step(world, 1);
-        const o = positionOf(world, d.orbiter);
-        try expectApproxEqAbs(@as(f32, 5), length(o), 5 * 0.03);
-        try expectEqual(@as(f32, 0), o[1]);
-    }
-}
-
-test "attractor stays put" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 4, 2, -3 }, 5, 4);
-
-    step(world, 240);
-    try expectEqual(Vec3{ 4, 2, -3 }, positionOf(world, d.center));
-}
-
-test "each period brings the orbiter back to its start" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    for (0..3) |_| {
-        step(world, 120);
-        try expect(distance(positionOf(world, d.orbiter), .{ 5, 0, 0 }) < 5 * 0.05);
-    }
-}
-
 test "FixedClock: fractional frames carry over" {
     var clock: FixedClock = .{};
     try expectEqual(@as(u32, 0), clock.advance(0)); // raylib's first frame
@@ -577,21 +620,6 @@ test "FixedClock: a long stall is capped and its backlog dropped" {
     var clock: FixedClock = .{};
     try expectEqual(max_steps_per_frame, clock.advance(3.0));
     try expectEqual(@as(u32, 0), clock.advance(0));
-}
-
-test "orbit survives a 3 s frame stall" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    var clock: FixedClock = .{};
-    step(world, 30);
-    for (0..clock.advance(3.0)) |_| _ = ecs.progress(world, step_dt);
-    for (0..120) |_| {
-        for (0..clock.advance(step_dt)) |_| _ = ecs.progress(world, step_dt);
-        try expectApproxEqAbs(@as(f32, 5), length(positionOf(world, d.orbiter)), 5 * 0.03);
-    }
 }
 
 test "FixedClock: alpha is the leftover fraction of a step" {
@@ -610,80 +638,6 @@ test "FrameStats: publishes mean and max once per window, then restarts" {
     try expectApproxEqAbs(3, s.max_ms, 1e-4);
     s.add(0.5, 0.0005); // a fresh window: the old peak is gone
     try expectApproxEqAbs(0.5, s.max_ms, 1e-4);
-}
-
-test "snapshot keeps the position from before the step" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    step(world, 10);
-    const before = positionOf(world, d.orbiter);
-    step(world, 1);
-    try expectEqual(before, ecs.get(world, d.orbiter, PrevPosition).?.v);
-    try expect(distance(before, positionOf(world, d.orbiter)) > 0);
-}
-
-test "ballQuery yields both demo balls" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    _ = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    const q = try ballQuery(world);
-    defer ecs.query_fini(q);
-    var n: usize = 0;
-    var with_prev: usize = 0; // only the orbiter has PrevPosition
-    var it = ecs.query_iter(world, q);
-    while (ecs.query_next(&it)) {
-        n += it.count();
-        if (ecs.field(&it, PrevPosition, 2) != null) with_prev += it.count();
-    }
-    try expectEqual(@as(usize, 2), n);
-    try expectEqual(@as(usize, 1), with_prev);
-}
-
-test "worker threads give the same result as one thread" {
-    const orbiters = 200;
-    var runs: [2][orbiters]Vec3 = undefined;
-    // zflecs allows one world at a time, so run them one after the other.
-    for (&runs, [_]i32{ 0, 4 }) |*out, threads| {
-        const world = ecs.init();
-        defer _ = ecs.fini(world);
-        register(world);
-        if (threads > 0) ecs.set_threads(world, threads);
-        const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 4);
-        const speed = 2 * std.math.pi * 5.0 / 4.0;
-        // Extra orbiters on tilted, widening paths, so work splits across workers.
-        var es: [orbiters]ecs.entity_t = undefined;
-        for (&es, 0..) |*e, i| {
-            const k: f32 = @floatFromInt(i);
-            e.* = ecs.new_id(world);
-            set(world, e.*, Position, .{ .v = .{ 3 + k * 0.02, 0, 0 } });
-            set(world, e.*, Velocity, .{ .v = .{ 0, k * 0.01, -speed } });
-            ecs.add_pair(world, e.*, ecs.id(Orbits), d.center);
-        }
-        step(world, 600);
-        for (out, es) |*p, e| p.* = positionOf(world, e);
-    }
-    try expectEqualSlices(Vec3, &runs[0], &runs[1]);
-}
-
-test "a center without Attractor pulls nothing, even if its own center has one" {
-    const world = ecs.init();
-    defer _ = ecs.fini(world);
-    register(world);
-    const d = spawnDemo(world, .{ 0, 0, 0 }, 5, 2);
-
-    // A moon of the orbiter, which has Position but no Attractor.
-    const moon = ecs.new_id(world);
-    set(world, moon, Position, .{ .v = .{ 5, 1, 0 } });
-    set(world, moon, Velocity, .{ .v = .{ 0, 0, 0 } });
-    ecs.add_pair(world, moon, ecs.id(Orbits), d.orbiter);
-
-    step(world, 10);
-    try expectEqual(Vec3{ 0, 0, 0 }, ecs.get(world, moon, Velocity).?.v);
 }
 
 test "OrbitCam: eye sits `distance` from the target, above it for positive pitch" {
@@ -748,7 +702,7 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
         }
         // The singleton is the mass-weighted mean, and remembers the step before.
         const b = positionOf(world, ecs.id(Barycenter));
-        try expect(distance(b, sum / splat(cluster_mass)) < 1e-4);
+        try expect(distance(b, sum / splat(mother_mass + child_mass * @as(f32, child_stretch.len))) < 1e-4);
         try expectEqual(before, ecs.get(world, ecs.id(Barycenter), PrevPosition).?.v);
         drift = @max(drift, distance(b, home));
     }
@@ -788,4 +742,170 @@ test "cord pulls when stretched and pushes when squeezed, on both ends" {
             try expect(m[0] < 0); // and pushed away
         }
     }
+}
+
+test "planets stay near their orbits and planes for two minutes" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world);
+
+    for (0..2 * 60 * 60) |_| {
+        step(world, 1);
+        const b = positionOf(world, ecs.id(Barycenter));
+        for (ps, planet_starts) |e, start| {
+            const d = positionOf(world, e) - b;
+            // A 10-minute probe stayed within 0.81-1.26 radii and 0.09 radii
+            // off the plane; these bounds leave room for that.
+            const r = length(d) / start.r;
+            try expect(r > 0.75 and r < 1.35);
+            try expect(@abs(d[1]) / start.r < 0.15);
+        }
+    }
+}
+
+test "pull sums every star, weighted by mass" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnStar(world, .{ -5, 0, 0 }, 1, 0.5, 0);
+    _ = spawnStar(world, .{ 5, 0, 0 }, 3, 0.5, 0);
+    const p = ecs.new_id(world);
+    set(world, p, Position, .{ .v = splat(0) });
+    set(world, p, Velocity, .{ .v = splat(0) });
+    ecs.add(world, p, Planet);
+
+    // The first step publishes the StarField (spawnStar alone doesn't); the
+    // second applies its pull.
+    _ = ecs.progress(world, step_dt);
+    const v0 = ecs.get(world, p, Velocity).?.v;
+    _ = ecs.progress(world, step_dt);
+    const v = ecs.get(world, p, Velocity).?.v - v0;
+    // Net pull toward the heavier star: g·(3 - 1)/5² (softened), along +x.
+    const r2 = 25 + planet_soft * planet_soft;
+    try expectApproxEqAbs(@as(f32, g * 2 * 5 / (r2 * @sqrt(r2)) * step_dt), v[0], 1e-3);
+    try expectEqual(@as(f32, 0), v[1]);
+}
+
+test "planets start at the circular speed for the stars' pull" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world);
+    const b = positionOf(world, ecs.id(Barycenter));
+    for (ps, planet_starts) |e, start| {
+        const d = positionOf(world, e) - b;
+        const v = ecs.get(world, e, Velocity).?.v;
+        try expectApproxEqAbs(start.r, length(d), 1e-3);
+        try expectApproxEqAbs(@as(f32, 0), dot(v, d), 1e-2); // tangential
+        const inward = -dot(fieldPull(ecs.get(world, ecs.id(StarField), StarField).?, positionOf(world, e)), d) / length(d);
+        try expectApproxEqAbs(inward * start.r, dot(v, v), 1e-2);
+        // Tilted by start.tilt: the orbit's axis leans that far off +y.
+        const axis = cross(d, v);
+        try expectApproxEqAbs(@cos(start.tilt), axis[1] / length(axis), 1e-4);
+    }
+}
+
+test "a planet spawned mid-wobble starts circular around the drifting barycenter" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    step(world, 200); // the barycenter is drifting by now
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    try expect(length(f.drift) > 1e-3);
+    const p = spawnPlanets(world)[0];
+    const d = positionOf(world, p) - f.center;
+    // No radial motion relative to the barycenter.
+    try expectApproxEqAbs(@as(f32, 0), dot(ecs.get(world, p, Velocity).?.v - f.drift, d), 1e-2);
+}
+
+test "massless stars leave the barycenter where it was" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnStar(world, .{ 3, 0, 0 }, 0, 0.5, 0);
+    step(world, 2);
+    const b = positionOf(world, ecs.id(Barycenter));
+    try expect(!std.math.isNan(b[0]));
+    try expectEqual(Vec3{ 0, 0, 0 }, b);
+}
+
+test "orbits survive a 3 s frame stall" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const ps = spawnPlanets(world);
+
+    var clock: FixedClock = .{};
+    step(world, 30);
+    for (0..clock.advance(3.0)) |_| _ = ecs.progress(world, step_dt);
+    for (0..120) |_| {
+        for (0..clock.advance(step_dt)) |_| _ = ecs.progress(world, step_dt);
+        const b = positionOf(world, ecs.id(Barycenter));
+        for (ps, planet_starts) |e, start| {
+            const r = distance(positionOf(world, e), b) / start.r;
+            try expect(r > 0.9 and r < 1.1);
+        }
+    }
+}
+
+test "snapshot keeps the position from before the step" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    const p = spawnPlanets(world)[0];
+
+    step(world, 10);
+    const before = positionOf(world, p);
+    step(world, 1);
+    try expectEqual(before, ecs.get(world, p, PrevPosition).?.v);
+    try expect(distance(before, positionOf(world, p)) > 0);
+}
+
+test "ballQuery yields every star and planet, all moving" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    _ = spawnPlanets(world);
+
+    const q = try ballQuery(world);
+    defer ecs.query_fini(q);
+    var n: usize = 0;
+    var with_prev: usize = 0;
+    var it = ecs.query_iter(world, q);
+    while (ecs.query_next(&it)) {
+        n += it.count();
+        if (ecs.field(&it, PrevPosition, 2) != null) with_prev += it.count();
+    }
+    const total = 1 + child_stretch.len + planet_starts.len;
+    try expectEqual(total, n);
+    try expectEqual(total, with_prev);
+}
+
+test "worker threads give the same result as one thread" {
+    const planets = 200;
+    var runs: [2][planets]Vec3 = undefined;
+    // zflecs allows one world at a time, so run them one after the other.
+    for (&runs, [_]i32{ 0, 4 }) |*out, threads| {
+        const world = ecs.init();
+        defer _ = ecs.fini(world);
+        register(world);
+        if (threads > 0) ecs.set_threads(world, threads);
+        _ = spawnCluster(world, .{ 0, 0, 0 });
+        // Many planets, so pull splits across workers.
+        var es: [planets]ecs.entity_t = undefined;
+        for (&es, 0..) |*e, i| {
+            const k: f32 = @floatFromInt(i);
+            e.* = spawnPlanet(world, .{ .r = 6 + k * 0.05, .phase = k, .node = k * 0.3, .tilt = 0.05, .radius = 0.1, .rgba = 0 });
+        }
+        step(world, 600);
+        for (out, es) |*p, e| p.* = positionOf(world, e);
+    }
+    try expectEqualSlices(Vec3, &runs[0], &runs[1]);
 }

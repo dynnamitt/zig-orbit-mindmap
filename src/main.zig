@@ -75,7 +75,8 @@ pub fn main() !void {
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
     _ = sim.spawnCluster(world, .{ 0, 0, 0 });
-    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.cluster_radius);
+    _ = sim.spawnPlanets(world);
+    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius);
 
     balls = try sim.ballQuery(world);
     defer ecs.query_fini(balls);
@@ -94,7 +95,7 @@ pub fn main() !void {
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
     // Fixed steps, never raylib's raw dt: a long frame would otherwise
-    // throw the orbit off for good, and dt=0 (first frame) would make
+    // fling planets out of orbit, and dt=0 (first frame) would make
     // flecs measure its own clock.
     for (0..clock.advance(rl.getFrameTime())) |_| _ = ecs.progress(world, sim.step_dt);
     const alpha = clock.alpha();
