@@ -62,8 +62,12 @@ const planet_starts = [_]PlanetStart{
     .{ .r = 12.8, .phase = 3.3, .node = 4.4, .tilt = 0.03, .radius = 0.45, .rgba = 0x5AA6A6FF },
     .{ .r = 14.0, .phase = 5.7, .node = 5.5, .tilt = -0.05, .radius = 0.35, .rgba = 0xE0A070FF },
 };
-/// Roughly how far the planets reach from the barycenter, for framing them.
-pub const system_radius = 14.0;
+/// How far the planets reach from the barycenter at the start, for framing.
+pub const system_radius = blk: {
+    var r: f32 = 0;
+    for (planet_starts) |start| r = @max(r, start.r + start.radius);
+    break :blk r;
+};
 
 /// How long `FrameStats` collects (seconds) before it updates its readout.
 const stats_window = 0.5;
@@ -84,15 +88,16 @@ fn cross(a: Vec3, b: Vec3) Vec3 {
     return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
 }
 
-/// Mass-weighted mean of `points` (positions or velocities); masses sum > 0.
-fn massCenter(points: []const Vec3, masses: []const f32) Vec3 {
+/// Mass-weighted mean of `points` (positions or velocities); null when the
+/// masses sum to 0.
+fn massCenter(points: []const Vec3, masses: []const f32) ?Vec3 {
     var sum = splat(0);
     var total: f32 = 0;
     for (points, masses) |p, m| {
         sum += p * splat(m);
         total += m;
     }
-    return sum / splat(total);
+    return if (total > 0) sum / splat(total) else null;
 }
 
 pub fn splat(k: f32) Vec3 {
@@ -343,8 +348,9 @@ fn barycenter(it: *ecs.iter_t) callconv(.c) void {
         }
     }
     if (f.n == 0) return;
-    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]);
-    f.drift = massCenter(vels[0..f.n], f.mass[0..f.n]);
+    // Massless stars: keep the last center rather than divide by zero.
+    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]) orelse field.?.center;
+    f.drift = massCenter(vels[0..f.n], f.mass[0..f.n]) orelse splat(0);
     field.?.* = f;
     center.?.v = f.center;
 }
@@ -488,7 +494,7 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
         f.pos[i] = p;
         f.mass[i] = child_mass;
     }
-    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]);
+    f.center = massCenter(f.pos[0..f.n], f.mass[0..f.n]).?;
     set(world, ecs.id(StarField), StarField, f);
     set(world, ecs.id(Barycenter), Position, .{ .v = f.center });
     set(world, ecs.id(Barycenter), PrevPosition, .{ .v = f.center });
@@ -520,7 +526,8 @@ fn spawnPlanet(world: *ecs.world_t, start: PlanetStart) ecs.entity_t {
     const e = ecs.new_id(world);
     set(world, e, Position, .{ .v = p });
     set(world, e, PrevPosition, .{ .v = p });
-    set(world, e, Velocity, .{ .v = rotate(along, node, start.tilt) * splat(speed) });
+    // Plus the barycenter's own drift, so the orbit is circular around it.
+    set(world, e, Velocity, .{ .v = f.drift + rotate(along, node, start.tilt) * splat(speed) });
     ecs.add(world, e, Planet);
     set(world, e, Ball, .{ .radius = start.radius, .rgba = start.rgba });
     return e;
@@ -799,6 +806,31 @@ test "planets start at the circular speed for the stars' pull" {
         const axis = cross(d, v);
         try expectApproxEqAbs(@cos(start.tilt), axis[1] / length(axis), 1e-4);
     }
+}
+
+test "a planet spawned mid-wobble starts circular around the drifting barycenter" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, .{ 0, 0, 0 });
+    step(world, 200); // the barycenter is drifting by now
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    try expect(length(f.drift) > 1e-3);
+    const p = spawnPlanets(world)[0];
+    const d = positionOf(world, p) - f.center;
+    // No radial motion relative to the barycenter.
+    try expectApproxEqAbs(@as(f32, 0), dot(ecs.get(world, p, Velocity).?.v - f.drift, d), 1e-2);
+}
+
+test "massless stars leave the barycenter where it was" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnStar(world, .{ 3, 0, 0 }, 0, 0.5, 0);
+    step(world, 2);
+    const b = positionOf(world, ecs.id(Barycenter));
+    try expect(!std.math.isNan(b[0]));
+    try expectEqual(Vec3{ 0, 0, 0 }, b);
 }
 
 test "orbits survive a 3 s frame stall" {
