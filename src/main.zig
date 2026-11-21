@@ -67,7 +67,7 @@ const EmscriptenPages = struct {
 var world: *ecs.world_t = undefined;
 var demo: sim.Demo = undefined;
 var balls: *ecs.query_t = undefined;
-var cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, orbit_radius);
+var cam: sim.OrbitCam = undefined;
 var clock: sim.FixedClock = .{};
 var stats: sim.FrameStats = .{};
 
@@ -80,6 +80,7 @@ pub fn main() !void {
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
     demo = sim.spawnDemo(world, .{ 0, 0, 0 }, orbit_radius, orbit_period);
+    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, demo.radius);
 
     balls = try sim.ballQuery(world);
     defer ecs.query_fini(balls);
@@ -125,7 +126,7 @@ fn frame() callconv(.c) void {
         .projection = .perspective,
     });
     // Orbit guide: raylib's circle lies in the xy plane; tip it into xz.
-    rl.drawCircle3D(vec3(center), orbit_radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
+    rl.drawCircle3D(vec3(center), demo.radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
 
     // Every Position + Ball entity.
     var it = ecs.query_iter(world, balls);

@@ -200,7 +200,7 @@ pub const OrbitCam = struct {
     const max_pitch = std.math.pi / 2.0 - 0.05;
     // Distances, as multiples of the radius `framing` is given.
     const frame_distance = 3.2;
-    const frame_min = 0.8;
+    const frame_min = 1.3;
     const frame_max = 12;
 
     /// A camera on `target` that fits a scene `radius` across in its default
@@ -218,6 +218,8 @@ pub const OrbitCam = struct {
     /// follows the mouse sideways, and dragging down looks from higher up.
     pub fn drag(self: *OrbitCam, dx: f32, dy: f32) void {
         self.yaw = @mod(self.yaw - dx * drag_speed, std.math.tau);
+        // In f32, @mod of a tiny negative rounds up to tau itself.
+        if (self.yaw >= std.math.tau) self.yaw = 0;
         self.pitch = std.math.clamp(self.pitch + dy * drag_speed, -max_pitch, max_pitch);
     }
 
@@ -233,7 +235,7 @@ pub const OrbitCam = struct {
     }
 };
 
-pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t };
+pub const Demo = struct { center: ecs.entity_t, orbiter: ecs.entity_t, radius: f32 };
 
 /// A static ball at `at` and a second ball circling it in the horizontal (xz)
 /// plane at `radius`, once every `period` seconds. Speed and pull are chosen
@@ -255,7 +257,7 @@ pub fn spawnDemo(world: *ecs.world_t, at: Vec3, radius: f32, period: f32) Demo {
     ecs.add_pair(world, orbiter, ecs.id(Orbits), center);
     set(world, orbiter, Ball, .{ .radius = radius * orbiter_size, .rgba = teal });
 
-    return .{ .center = center, .orbiter = orbiter };
+    return .{ .center = center, .orbiter = orbiter, .radius = radius };
 }
 
 /// Query over every drawable entity: term 0 = `Position`, term 1 = `Ball`,
@@ -498,6 +500,9 @@ test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
     cam.drag(0, -1e6);
     try expectEqual(-OrbitCam.max_pitch, cam.pitch);
     cam.drag(-std.math.tau / OrbitCam.drag_speed * 3.5, 0);
+    try expect(cam.yaw >= 0 and cam.yaw < std.math.tau);
+    cam.yaw = 0;
+    cam.drag(1e-6, 0); // a sub-pixel step backwards from 0
     try expect(cam.yaw >= 0 and cam.yaw < std.math.tau);
 }
 
