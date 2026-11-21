@@ -75,7 +75,8 @@ pub fn main() !void {
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
     _ = sim.spawnCluster(world, .{ 0, 0, 0 });
-    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.cluster_radius);
+    _ = sim.spawnPlanets(world);
+    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius);
 
     balls = try sim.ballQuery(world);
     defer ecs.query_fini(balls);
