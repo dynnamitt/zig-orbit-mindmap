@@ -9,12 +9,8 @@ const width = 800;
 const height = 450;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
-const orbit_guide = 0x1E5252FF; // deep teal
 const sand = 0xC8A878FF; // readout text
 
-// World units.
-const orbit_radius = 5;
-const orbit_period = 4; // seconds
 const fovy = 45; // degrees, vertical
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
@@ -65,7 +61,6 @@ const EmscriptenPages = struct {
 /// Globals, not locals in main: on web, emscripten_set_main_loop unwinds
 /// main's stack and calls frame() later.
 var world: *ecs.world_t = undefined;
-var demo: sim.Demo = undefined;
 var balls: *ecs.query_t = undefined;
 var cam: sim.OrbitCam = undefined;
 var clock: sim.FixedClock = .{};
@@ -79,8 +74,8 @@ pub fn main() !void {
     defer _ = ecs.fini(world);
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
-    demo = sim.spawnDemo(world, .{ 0, 0, 0 }, orbit_radius, orbit_period);
-    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, demo.radius);
+    _ = sim.spawnCluster(world, .{ 0, 0, 0 });
+    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.cluster_radius);
 
     balls = try sim.ballQuery(world);
     defer ecs.query_fini(balls);
@@ -110,9 +105,10 @@ fn frame() callconv(.c) void {
         cam.drag(d.x, d.y);
     }
     cam.zoom(rl.getMouseWheelMove());
-    // Where the center is drawn, so the camera never jitters against it.
-    const center = drawnAt(ecs.get(world, demo.center, sim.Position).?.*, ecs.get(world, demo.center, sim.PrevPosition), alpha);
-    cam.target = center;
+    // The barycenter, interpolated like the stars, so the camera never
+    // jitters against them.
+    const bary = ecs.get(world, ecs.id(sim.Barycenter), sim.Barycenter).?;
+    cam.target = std.math.lerp(bary.prev, bary.cur, sim.splat(alpha));
 
     rl.beginDrawing();
     defer rl.endDrawing();
@@ -125,9 +121,6 @@ fn frame() callconv(.c) void {
         .fovy = fovy,
         .projection = .perspective,
     });
-    // Orbit guide: raylib's circle lies in the xy plane; tip it into xz.
-    rl.drawCircle3D(vec3(center), demo.radius, .{ .x = 1, .y = 0, .z = 0 }, 90, rl.getColor(orbit_guide));
-
     // Every Position + Ball entity.
     var it = ecs.query_iter(world, balls);
     while (ecs.query_next(&it)) {
