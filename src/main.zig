@@ -30,8 +30,8 @@ const start_ring_gray = 0x66666670;
 const start_ring_segments = 160;
 // Thrusters (sim.Thruster): a nozzle disc set into the planet on the side it
 // pushes from, and while firing a tapered, pulsing exhaust beam out of it,
-// opposite its thrust (a damped spring toward its slot's place and speed, so it
-// can point away while braking). Both glow while firing.
+// opposite its thrust (sim.zig `thrust`: it can point away from the slot while
+// braking). Both glow while firing.
 const nozzle_idle = 0x2A2E2EFF; // dark, like a hole
 const flame = 0xFF9A3CFF; // orange
 const flame_hot = 0xFFF2C8FF; // near white, at the pulse peak
@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     loc_star_count = rl.getShaderLocation(planet_material.shader, "starCount");
     loc_star_pos = rl.getShaderLocation(planet_material.shader, "starPos");
     loc_star_light = rl.getShaderLocation(planet_material.shader, "starLight");
-    // raylib falls back to its default shader when ours doesn't compile
+    // raylib falls back to its default shader when ours doesn't compile or link
     // (e.g. only the ES 1.00 variant on web): fail instead of drawing unlit.
     if (planet_material.shader.id == rlGetShaderIdDefault() or loc_star_count < 0 or loc_star_pos < 0 or loc_star_light < 0)
         return error.PlanetShader;
@@ -350,7 +350,8 @@ fn unloadGlow() void {
     for (glow) |g| rl.unloadRenderTexture(g);
 }
 
-/// Stars (a bit larger) and cords into glow[0], then blurred there.
+/// Every ball in black, then cords, stars (a bit larger) and firing thrusters
+/// into glow[0], then blurred there.
 fn glowPass(camera: rl.Camera3D) void {
     rl.beginTextureMode(glow[0]);
     rl.clearBackground(.black);
