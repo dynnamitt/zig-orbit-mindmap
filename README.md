@@ -9,8 +9,9 @@ A 3D star system as an IPO (input → process → output) mind map, in Zig 0.17 
 [zflecs](https://github.com/zig-gamedev/zflecs) for ECS. Both come in as Zig packages pinned in `build.zig.zon`.
 
 - **Process:** the warm-white mother star, in the middle.
-- **Outputs:** green child stars, tied to her by glowing cords.
-- **Inputs:** planets that orbit the cluster's centre of gravity, pulled by every star. Each has a dashed line to the mother's ring and a thruster that fires to bring it back to its slot on the ring.
+- **Outputs:** phosphor-green child stars, tied to her by glowing cords.
+- **Inputs:** planets that orbit the cluster's centre of gravity, pulled by every star. Each has a dashed line to the mother's ring, in the colour of its orbit ring (amber inner, cyan outer), and a thruster that fires to bring it back to its slot on the ring.
+- **Backdrop:** a shader starfield that turns with the camera.
 
 Drag (or one finger) to orbit the camera; scroll (or pinch) to zoom. The window resizes freely, and
 in the browser it fills the viewport in either orientation.

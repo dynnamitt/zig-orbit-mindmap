@@ -5,7 +5,7 @@ const ecs = @import("zflecs");
 
 // Star colours: the mother is the brightest (warm white), her children green.
 const mother_white: u32 = 0xFFF1D6FF;
-const child_green: u32 = 0x4FC27AFF;
+const child_green: u32 = 0x3DDC84FF; // phosphor green, as on an old terminal
 
 // Star cluster (world units; masses only matter relative to each other). The
 // mother is slightly smaller than her children but heavier, and is held home
@@ -195,9 +195,9 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
-/// Where a planet belongs: on its ring (`r`), at `phase`, which turns at the
-/// ring's speed `omega` (rad/s), so the slots keep the even spacing.
-pub const Slot = struct { r: f32, phase: f32, omega: f32 };
+/// Where a planet belongs: on its ring (`ringRadius(ring)`), at `phase`, which
+/// turns at the ring's speed `omega` (rad/s), so the slots keep the even spacing.
+pub const Slot = struct { ring: u1, phase: f32, omega: f32 };
 /// A planet's thruster: `on` while it steers back to its slot, pushing along
 /// `dir` (unit; while idle, it swivels toward the push it would give);
 /// `time` counts how long it has been firing.
@@ -413,10 +413,11 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
     for (positions, velocities, slots, thrusters) |p, *v, *slot, *t| {
         // Compare with the slot where it is now, then move the slot on.
         defer slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
-        const target = f.center + ringDir(slot.phase) * splat(slot.r);
+        const r = ringRadius(slot.ring);
+        const target = f.center + ringDir(slot.phase) * splat(r);
         const ahead = ringDir(slot.phase + std.math.pi / 2.0);
-        const target_v = f.drift + ahead * splat(slot.omega * slot.r);
-        const off = length(target - p.v) / slot.r;
+        const target_v = f.drift + ahead * splat(slot.omega * r);
+        const off = length(target - p.v) / r;
         if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
         var a = (target - p.v) * splat(thrust_k) + (target_v - v.v) * splat(thrust_damp);
         const n = length(a);
@@ -769,6 +770,15 @@ pub fn ringDir(angle: f32) Vec3 {
     return rotate(.{ @cos(angle), 0, -@sin(angle) }, planet_tilt_axis, planet_tilt);
 }
 
+/// How far `p` is from planet ring `ring` drawn around `center`: 0 on the
+/// circle itself, a planet's radius when its sphere just touches it.
+pub fn ringGap(p: Vec3, center: Vec3, ring: u1) f32 {
+    const d = p - center;
+    const up = cross(ringDir(0), ringDir(std.math.pi / 2.0)); // the ring plane's normal
+    const h = dot(d, up);
+    return std.math.hypot(length(d - up * splat(h)) - ringRadius(ring), h);
+}
+
 /// `n` planets laid out by `planetSlot` around the current barycenter (so
 /// spawn the cluster first), each an input of `mother`. Each ring's planets
 /// share one speed: the circular speed for the stars' mean inward pull on
@@ -789,7 +799,7 @@ pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize
         // circular around it.
         const speed = @sqrt(@max(0, inward[slot.ring] / on_ring[slot.ring]) * slot.r);
         e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planets[i % planets.len]);
-        set(world, e.*, Slot, .{ .r = slot.r, .phase = slot.phase, .omega = speed / slot.r });
+        set(world, e.*, Slot, .{ .ring = slot.ring, .phase = slot.phase, .omega = speed / slot.r });
         set(world, e.*, Thruster, .{ .dir = slot.along }); // trailing, until a push builds up
     }
     return out;
@@ -1385,7 +1395,18 @@ test "ringDir/ringRadius trace the rings planets start on" {
 fn slotOff(world: *ecs.world_t, e: ecs.entity_t) f32 {
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     const s = ecs.get(world, e, Slot).?;
-    return distance(positionOf(world, e), f.center + ringDir(s.phase) * splat(s.r)) / s.r;
+    const r = ringRadius(s.ring);
+    return distance(positionOf(world, e), f.center + ringDir(s.phase) * splat(r)) / r;
+}
+
+test "ringGap: distance to the ring's circle, in and out of its plane" {
+    const c: Vec3 = .{ 1, 2, 3 };
+    const r = ringRadius(1);
+    const up = cross(ringDir(0), ringDir(std.math.pi / 2.0));
+    try expectApproxEqAbs(@as(f32, 0), ringGap(c + ringDir(0.7) * splat(r), c, 1), 1e-4);
+    try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(2) * splat(r + 0.5), c, 1), 1e-4);
+    try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(4) * splat(r) + up * splat(0.5), c, 1), 1e-4);
+    try expectApproxEqAbs(@as(f32, 3), ringGap(c + ringDir(1) * splat(r - 3), c, 1), 1e-4);
 }
 
 test "thrusters: on its slot a planet coasts" {

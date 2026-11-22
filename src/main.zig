@@ -14,19 +14,30 @@ const min_side = 64;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const sand = 0xC8A878FF; // readout text
-const link_gray = 0x666666FF; // planet-to-ring dashes and the mother's ring
-const cord_glow = 0xB8F5C8FF; // pale green: the children's cords
+const link_gray = 0x666666FF; // the mother's ring
+const cord_glow = 0xB4F7CFFF; // pale phosphor green: the children's cords
+/// Theme (phosphor CRT, beside the children's green in sim.zig): the planets'
+/// orbit rings, inner amber and outer cyan. A planet's link takes its ring's.
+const ring_colors = [2]u32{ 0xFFB000FF, 0x3FC8D0FF };
 
 // Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
-// planet links are dashes from the planet to the mother's ring.
+// planet links are faded tube dashes from the planet to the mother's ring:
+// thinner and a little brighter while the planet is off its ring (not touching).
 const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
+const tube_sides = 6; // faded rings' and links' tubes
+const link_width = 0.05; // tube radius
+const link_alpha = 0.35;
+const link_off_thin = 0.5; // × link_width
+const link_off_alpha = 0.5;
+const link_off_brighten = 0.2; // rl.colorBrightness
 /// The mother's ring: radius as a multiple of hers, leaving room for her glow.
 const ring_scale = 2.2;
 const ring_segments = 48;
-/// The planets' starting rings: thin, faded dots (every other segment).
-const start_ring_gray = 0x66666670;
+/// The planets' starting rings: faded tube dashes (every other segment).
+const start_ring_width = 0.06; // tube radius
+const start_ring_alpha = 0.3;
 const start_ring_segments = 160;
 // Thrusters (sim.Thruster): a nozzle disc set into the planet on the side it
 // pushes from, and while firing a tapered, pulsing exhaust beam out of it,
@@ -98,6 +109,12 @@ const planet_fs = (if (web)
 else
     "#version 330\nin vec3 fragPos;\nin vec3 fragNormal;\nout vec4 fragOut;\n#define FRAG fragOut\n") ++
     std.fmt.comptimePrint("#define MAX_STARS {d}\n", .{sim.max_stars}) ++ @embedFile("shaders/planet.fs");
+// Starfield (src/shaders/sky.fs): drawn first, added onto the background.
+// highp where WebGL has it: the shader's hash needs it.
+const sky_fs = (if (web)
+    "#version 100\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#define FRAG gl_FragColor\n"
+else
+    "#version 330\nout vec4 fragOut;\n#define FRAG fragOut\n") ++ @embedFile("shaders/sky.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -173,6 +190,9 @@ var star_n: i32 = 0;
 var star_pos: [sim.max_stars][3]f32 = undefined;
 var star_light: [sim.max_stars][3]f32 = undefined;
 var star_mass_total: f32 = 0;
+var sky: rl.Shader = undefined;
+/// sky.fs uniform locations, by name.
+var sky_loc: struct { resolution: i32, fwd: i32, right: i32, up: i32, time: i32 } = undefined;
 var cam: sim.OrbitCam = undefined;
 var touch: sim.TouchSteer = .{};
 /// This frame's interpolation weight and camera position, for the draw callbacks.
@@ -237,6 +257,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (planet_material.shader.id == rlGetShaderIdDefault() or loc_star_count < 0 or loc_star_pos < 0 or loc_star_light < 0)
         return error.PlanetShader;
     rl.setShaderValue(planet_material.shader, rl.getShaderLocation(planet_material.shader, "ambient"), &planet_ambient, .float);
+    sky = try rl.loadShaderFromMemory(null, sky_fs);
+    defer rl.unloadShader(sky);
+    // Likewise: raylib's fallback shader would paint the whole screen white.
+    if (sky.id == rlGetShaderIdDefault()) return error.SkyShader;
+    inline for (@typeInfo(@TypeOf(sky_loc)).@"struct".field_names) |name| {
+        @field(sky_loc, name) = rl.getShaderLocation(sky, name);
+        if (@field(sky_loc, name) < 0) return error.SkyShader;
+    }
 
     if (web) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -276,13 +304,15 @@ fn frame() callconv(.c) void {
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
+    drawSky(frame_camera);
     rl.beginMode3D(frame_camera);
-    drawStartRings();
     forEachDrawn(cords, drawCord);
     forEachDrawn(balls, drawUnlitBall);
     lightPlanets();
     forEachDrawn(planets, drawPlanet);
     forEachDrawn(thrusters, drawThruster);
+    // See-through last, so they don't hide what is behind them.
+    drawStartRings();
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
     rl.endMode3D();
@@ -454,27 +484,55 @@ fn drawCord(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     rl.drawCylinderEx(vec3(at), vec3(to), r, r, cord_sides, rl.getColor(cord_glow));
 }
 
-/// Dashes from a planet to its mother's ring (its sphere hides the start).
-fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
+/// Dashes from a planet to its mother's ring (its sphere hides the start), in
+/// its orbit ring's colour: thinner and brighter while it is off that ring.
+fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const mother = sim.pairTarget(it, 2);
     const d = drawnOf(mother) - at;
     const len = sim.length(d) - ringRadius(mother);
     if (len <= 0) return;
+    const e = it.entities()[i];
+    const ring = ecs.get(world, e, sim.Slot).?.ring;
+    const off = sim.ringGap(at, cam.target, ring) > ecs.get(world, e, sim.Ball).?.radius;
+    const base = rl.getColor(ring_colors[ring]);
+    const color = if (off) rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) else rl.colorAlpha(base, link_alpha);
+    const width: f32 = if (off) link_width * link_off_thin else link_width;
     const dir = sim.normalize(d);
-    const color = rl.getColor(link_gray);
     var t: f32 = 0;
     while (t < len) : (t += dash_len + dash_gap) {
-        rl.drawLine3D(vec3(at + dir * sim.splat(t)), vec3(at + dir * sim.splat(@min(t + dash_len, len))), color);
+        drawSegment(at + dir * sim.splat(t), at + dir * sim.splat(@min(t + dash_len, len)), width, color);
     }
 }
 
-/// The rings the planets are laid out on (and drift from), faded dots around
-/// the current barycenter, which their orbits circle.
+/// The rings the planets are laid out on (and drift from), faded dashes in
+/// their theme colours around the current barycenter, which their orbits circle.
 fn drawStartRings() void {
     for (0..sim.planet_rings) |ring| {
         const r = sim.splat(sim.ringRadius(@intCast(ring)));
-        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, rl.getColor(start_ring_gray));
+        const color = rl.colorAlpha(rl.getColor(ring_colors[ring]), start_ring_alpha);
+        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, start_ring_width, color);
     }
+}
+
+/// The starfield, added onto the cleared background. It turns with the
+/// camera: sky.fs gets the camera's axes, scaled to the field of view.
+fn drawSky(camera: rl.Camera3D) void {
+    const tan_h = @tan(std.math.degreesToRadians(camera.fovy / 2));
+    const fwd = sim.normalize(cam.target - eye);
+    const right = sim.normalize(sim.cross(fwd, .{ 0, 1, 0 }));
+    const axes = [3][3]f32{ fwd, right * sim.splat(tan_h * aspect()), sim.cross(right, fwd) * sim.splat(tan_h) };
+    const res = [2]f32{ @floatFromInt(rl.getRenderWidth()), @floatFromInt(rl.getRenderHeight()) };
+    const time: f32 = @floatCast(rl.getTime());
+    rl.setShaderValue(sky, sky_loc.resolution, &res, .vec2);
+    rl.setShaderValue(sky, sky_loc.fwd, &axes[0], .vec3);
+    rl.setShaderValue(sky, sky_loc.right, &axes[1], .vec3);
+    rl.setShaderValue(sky, sky_loc.up, &axes[2], .vec3);
+    rl.setShaderValue(sky, sky_loc.time, &time, .float);
+    rl.beginShaderMode(sky);
+    rl.beginBlendMode(.additive);
+    rl.drawRectangle(0, 0, screenSize()[0], screenSize()[1], .white);
+    rl.endBlendMode();
+    rl.endShaderMode();
 }
 
 /// A body's name on screen beside its sphere; none behind the camera.
@@ -597,20 +655,27 @@ fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const right = sim.cross(view, .{ 0, 1, 0 });
     const u = sim.normalize(right) * sim.splat(r);
     const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
-    drawCircle(at, u, v, ring_segments, 1, rl.getColor(link_gray));
+    drawCircle(at, u, v, ring_segments, 1, 0, rl.getColor(link_gray));
 }
 
 /// A circle around `center` spanned by the radius vectors `u` and `v`, in
-/// `segments` straight pieces: every one (`step` 1) or every other (2, dotted).
-fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, color: rl.Color) void {
+/// `segments` straight pieces (`drawSegment`s of `width`): every one (`step`
+/// 1) or every other (2, dashed).
+fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, width: f32, color: rl.Color) void {
     var k: usize = 0;
     while (k < segments) : (k += step) {
         const a0 = std.math.tau * @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(segments));
         const a1 = std.math.tau * @as(f32, @floatFromInt(k + 1)) / @as(f32, @floatFromInt(segments));
         const p0 = center + u * sim.splat(@cos(a0)) + v * sim.splat(@sin(a0));
         const p1 = center + u * sim.splat(@cos(a1)) + v * sim.splat(@sin(a1));
-        rl.drawLine3D(vec3(p0), vec3(p1), color);
+        drawSegment(p0, p1, width, color);
     }
+}
+
+/// A straight piece from `a` to `b`: a line, or a tube of radius `width` if
+/// that is above 0.
+fn drawSegment(a: sim.Vec3, b: sim.Vec3, width: f32, color: rl.Color) void {
+    if (width > 0) rl.drawCylinderEx(vec3(a), vec3(b), width, width, tube_sides, color) else rl.drawLine3D(vec3(a), vec3(b), color);
 }
 
 fn ringRadius(mother: ecs.entity_t) f32 {

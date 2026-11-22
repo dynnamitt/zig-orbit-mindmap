@@ -53,8 +53,8 @@ The scene lays out an Input-Process-Output model as a star system (sample data: 
 | IPO | Body | Look |
 |---|---|---|
 | **P** | `Mother` star | Warm white (the lightest colour), smaller than her children, unlabelled, a gray ring around her |
-| **O** | Child stars ×3 | Green, labelled, tied to her by glowing cords (`(Cord, mother)`) |
-| **I** | Planets ×12 | Lit, labelled, a dashed gray line to her ring (`(InputOf, mother)`), a thruster each |
+| **O** | Child stars ×3 | Phosphor green, labelled, tied to her by glowing cords (`(Cord, mother)`) |
+| **I** | Planets ×12 | Lit, labelled, a dashed line to her ring in its orbit ring's colour (`(InputOf, mother)`), a thruster each |
 
 ### Frame loop (main.zig)
 
@@ -70,11 +70,12 @@ The scene lays out an Input-Process-Output model as a star system (sample data: 
 `forEachDrawn(query, callback)` runs a draw callback per entity of a sim query (all put `Position`, optional `PrevPosition` first; `ballQuery(world, ?Tag)` and `linkQuery(world, Rel)`, link targets via `pairTarget`). Per frame:
 
 1. **Glow pass** (`glowPass`, into a half-size texture): every ball in black (so planets hide the glow behind them), then cords, stars (`ballQuery(world, Star)`, drawn larger) and firing thrusters; then `blur_rounds` rounds of a separable 9-tap Gaussian (horizontal, then vertical, ping-ponging between `glow[0]` and `glow[1]`; taps `blur_spread` texels apart; `src/shaders/blur.fs`).
-2. **Scene,** in `beginMode3D`: the planets' layout rings as faded dots around the current barycenter (`drawStartRings`, from `sim.ringRadius`/`ringDir`); cords (thicker as they shorten, `Cord.radius`); stars flat (they glow); planets lit (`lightPlanets` hands the stars' drawn positions and colour × mass share to `src/shaders/planet.{vs,fs}`, and `drawPlanet` draws one unit sphere mesh, which has normals where `drawSphere` doesn't, scaled per planet); thrusters (a nozzle disc, and while firing a pulsing exhaust beam opposite its thrust (see `thrust` below; it can point away from the slot while braking)); the gray planet links; the mothers' camera-facing rings.
-3. **Glow composite:** the blurred texture added on top twice (`glow_layers`).
-4. **Labels** (`drawLabel`), last so they stay crisp: each `Label` beside its sphere, flipping left at the screen edge (outputs, the child stars with a `(Cord, mother)` pair, larger and in their own green with a dark outline); zoomed in k times, labels grow k^0.8 (`label_zoom_follow`).
+2. **Starfield** (`drawSky`, before `beginMode3D`): `src/shaders/sky.fs` on a full-screen rectangle, added onto the background. Hashed stars on a sky sphere that turns with the camera (it gets the camera's axes scaled to the fov); a few twinkle.
+3. **Scene,** in `beginMode3D`: cords (thicker as they shorten, `Cord.radius`); stars flat (they glow); planets lit (`lightPlanets` hands the stars' drawn positions and colour × mass share to `src/shaders/planet.{vs,fs}`, and `drawPlanet` draws one unit sphere mesh, which has normals where `drawSphere` doesn't, scaled per planet); thrusters (a nozzle disc, and while firing a pulsing exhaust beam opposite its thrust (see `thrust` below; it can point away from the slot while braking)); then the see-through ones: the planets' layout rings as faded tube dashes in the theme colours (`ring_colors`: inner amber, outer cyan) around the current barycenter (`drawStartRings`, from `sim.ringRadius`/`ringDir`), the planet links as faded tube dashes in their ring's colour, thinner and brighter while the planet's sphere is off its ring (`sim.ringGap` > its radius); the mothers' camera-facing rings.
+4. **Glow composite:** the blurred texture added on top twice (`glow_layers`).
+5. **Labels** (`drawLabel`), last so they stay crisp: each `Label` beside its sphere, flipping left at the screen edge (outputs, the child stars with a `(Cord, mother)` pair, larger and in their own green with a dark outline); zoomed in k times, labels grow k^0.8 (`label_zoom_follow`).
 
-Shaders keep one body each; main.zig prepends a GLSL 330 or GLSL ES 1.00 header at comptime (`MAX_STARS` = `sim.max_stars` for the planet shader). If the planet shader fails to compile or link, startup fails rather than drawing unlit.
+Shaders keep one body each; main.zig prepends a GLSL 330 or GLSL ES 1.00 header at comptime (`MAX_STARS` = `sim.max_stars` for the planet shader). If the planet or sky shader fails to compile or link, startup fails rather than drawing unlit (or a white screen: raylib's fallback shader).
 
 ### Simulation (sim.zig)
 
