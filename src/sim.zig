@@ -12,7 +12,7 @@ const child_green: u32 = 0x4FC27AFF;
 // by a weak spring. Every cord is a spring that pulls both ends; every pair of
 // stars pushes apart a little. Nothing damps it, so the cluster keeps
 // breathing; the anchor lets the barycenter drift a little with it.
-const mother_radius = 0.55;
+const mother_radius = 0.4;
 const mother_mass = 1.0;
 const child_radius = 0.7;
 const child_mass = 0.5;
@@ -39,7 +39,7 @@ const children = [_]ChildData{
     .{ .name = "Pages site", .stretch = 0.05 },
 };
 /// Most stars the `cluster` system handles (it works on all of them at once).
-const max_stars = 16;
+pub const max_stars = 16;
 
 // Planets (the IPO's inputs): every star pulls each one with g·mass/r²,
 // softened so a close pass stays finite. The cluster is lumpy and wobbles,
@@ -60,7 +60,7 @@ const planet_settle = 0.1;
 const planet_ring_r = 9.0;
 const planet_ring_bump = 2.5;
 const planet_ring_max = 8;
-const planet_radius = 0.35;
+const planet_radius = 0.48;
 const planet_tilt = 0.06;
 /// Every planet orbit tilts `planet_tilt` about this axis.
 const planet_tilt_axis: Vec3 = .{ 1, 0, 0 };

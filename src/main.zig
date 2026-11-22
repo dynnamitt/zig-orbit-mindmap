@@ -52,6 +52,23 @@ const blur_fs = (if (builtin.os.tag == .emscripten)
     "#version 100\nprecision mediump float;\nvarying vec2 fragTexCoord;\n#define TEX texture2D\n#define FRAG gl_FragColor\n"
 else
     "#version 330\nin vec2 fragTexCoord;\nout vec4 fragOut;\n#define TEX texture\n#define FRAG fragOut\n") ++ @embedFile("shaders/blur.fs");
+
+// Planet lighting (src/shaders/planet.vs/.fs): a faint ambient plus every
+// star's colour, weighted by its share of the stars' mass, where the surface
+// faces it. Lit sides come out brighter than the base colour.
+const planet_ambient: f32 = 0.3;
+const planet_light_gain: f32 = 1.0;
+const planet_mesh_detail = 24; // rings and slices of the unit sphere
+const web = builtin.os.tag == .emscripten;
+const planet_vs = (if (web)
+    "#version 100\nattribute vec3 vertexPosition;\nattribute vec3 vertexNormal;\nvarying vec3 fragPos;\nvarying vec3 fragNormal;\n"
+else
+    "#version 330\nin vec3 vertexPosition;\nin vec3 vertexNormal;\nout vec3 fragPos;\nout vec3 fragNormal;\n") ++ @embedFile("shaders/planet.vs");
+const planet_fs = (if (web)
+    "#version 100\nprecision mediump float;\nvarying vec3 fragPos;\nvarying vec3 fragNormal;\n#define FRAG gl_FragColor\n"
+else
+    "#version 330\nin vec3 fragPos;\nin vec3 fragNormal;\nout vec4 fragOut;\n#define FRAG fragOut\n") ++
+    std.fmt.comptimePrint("#define MAX_STARS {d}\n", .{sim.max_stars}) ++ @embedFile("shaders/planet.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -113,6 +130,19 @@ var frame_camera: rl.Camera3D = undefined;
 var glow: [2]rl.RenderTexture2D = undefined;
 var blur: rl.Shader = undefined;
 var blur_tap: i32 = undefined;
+var planets: *ecs.query_t = undefined;
+/// A unit sphere with normals, scaled per planet, and its lit material.
+var planet_mesh: rl.Mesh = undefined;
+var planet_material: rl.Material = undefined;
+/// planet.fs uniform locations.
+var loc_star_count: i32 = undefined;
+var loc_star_pos: i32 = undefined;
+var loc_star_light: i32 = undefined;
+/// This frame's stars, as the planet shader sees them.
+var star_n: i32 = 0;
+var star_pos: [sim.max_stars][3]f32 = undefined;
+var star_light: [sim.max_stars][3]f32 = undefined;
+var star_mass_total: f32 = 0;
 var cam: sim.OrbitCam = undefined;
 var touch: sim.TouchSteer = .{};
 /// This frame's interpolation weight and camera position, for the draw callbacks.
@@ -154,6 +184,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
     defer rl.unloadShader(blur);
     blur_tap = rl.getShaderLocation(blur, "tap");
+
+    planets = try sim.ballQuery(world, sim.Planet);
+    defer ecs.query_fini(planets);
+    planet_mesh = rl.genMeshSphere(1, planet_mesh_detail, planet_mesh_detail);
+    defer rl.unloadMesh(planet_mesh);
+    planet_material = try rl.loadMaterialDefault();
+    planet_material.shader = try rl.loadShaderFromMemory(planet_vs, planet_fs);
+    defer rl.unloadMaterial(planet_material); // and its shader
+    loc_star_count = rl.getShaderLocation(planet_material.shader, "starCount");
+    loc_star_pos = rl.getShaderLocation(planet_material.shader, "starPos");
+    loc_star_light = rl.getShaderLocation(planet_material.shader, "starLight");
+    rl.setShaderValue(planet_material.shader, rl.getShaderLocation(planet_material.shader, "ambient"), &planet_ambient, .float);
 
     if (builtin.os.tag == .emscripten) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -200,7 +242,9 @@ fn frame() callconv(.c) void {
     rl.beginMode3D(frame_camera);
     drawStartRings();
     forEachDrawn(cords, drawCord);
-    forEachDrawn(balls, ballDrawer(1, null));
+    forEachDrawn(stars, ballDrawer(1, null));
+    lightPlanets();
+    forEachDrawn(planets, drawPlanet);
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
     rl.endMode3D();
@@ -410,6 +454,40 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const x = @max(0, if (center.x + offset + text_w > w) center.x - offset - text_w else center.x + offset);
     const y = center.y - label_font_size / 2;
     rl.drawText(text, @intFromFloat(x), @intFromFloat(y), label_font_size, rl.getColor(label_color));
+}
+
+/// Hands this frame's stars (drawn positions, colour × share of the mass) to
+/// the planet shader.
+fn lightPlanets() void {
+    star_n = 0;
+    star_mass_total = 0;
+    forEachDrawn(stars, gatherStar);
+    for (star_light[0..@intCast(star_n)]) |*l| {
+        for (l) |*c| c.* *= planet_light_gain / star_mass_total;
+    }
+    const shader = planet_material.shader;
+    rl.setShaderValue(shader, loc_star_count, &star_n, .int);
+    rl.setShaderValueV(shader, loc_star_pos, &star_pos, .vec3, star_n);
+    rl.setShaderValueV(shader, loc_star_light, &star_light, .vec3, star_n);
+}
+
+fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    if (star_n == sim.max_stars) return;
+    const mass = ecs.field(it, sim.Star, 3).?[i].mass;
+    const c = rl.getColor(ecs.field(it, sim.Ball, 2).?[i].rgba);
+    const k: usize = @intCast(star_n);
+    star_pos[k] = .{ at[0], at[1], at[2] };
+    star_light[k] = .{ @as(f32, @floatFromInt(c.r)) / 255 * mass, @as(f32, @floatFromInt(c.g)) / 255 * mass, @as(f32, @floatFromInt(c.b)) / 255 * mass };
+    star_mass_total += mass;
+    star_n += 1;
+}
+
+/// A planet: the lit unit sphere, scaled to its radius, in its colour.
+fn drawPlanet(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    planet_material.maps[@backingInt(rl.MaterialMapIndex.albedo)].color = rl.getColor(b.rgba);
+    const transform = rl.math.matrixMultiply(rl.math.matrixScale(b.radius, b.radius, b.radius), rl.math.matrixTranslate(at[0], at[1], at[2]));
+    rl.drawMesh(planet_mesh, planet_material, transform);
 }
 
 /// A gray circle around a mother that always faces the camera.
