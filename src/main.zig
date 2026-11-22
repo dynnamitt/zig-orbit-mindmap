@@ -46,8 +46,10 @@ const label_font_size = 16; // at the default zoom and further out
 /// Outputs (labelled stars): larger, in their star's own green. 20 is 2x
 /// raylib's 10 px default font, so it stays crisp.
 const output_font_size = 20;
-/// Their dark outline (the background colour), so they read over the glow:
-/// 1 px at `output_font_size`, thicker as they grow.
+/// Their dark outline (the background colour, part see-through), so they read
+/// over the glow: 1 px at `output_font_size`, thicker as they grow. Where the
+/// 8 offset copies overlap, the alpha stacks a little darker.
+const outline_color = (background & 0xFFFFFF00) | 0xA0;
 const outline_offsets = [_][2]i32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
 const label_zoom_follow = 0.8;
@@ -498,7 +500,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const yi: i32 = @intFromFloat(y);
     if (output) {
         const t = @max(1, @divTrunc(size, output_font_size));
-        for (outline_offsets) |d| rl.drawText(text, xi + d[0] * t, yi + d[1] * t, size, rl.getColor(background));
+        for (outline_offsets) |d| rl.drawText(text, xi + d[0] * t, yi + d[1] * t, size, rl.getColor(outline_color));
     }
     rl.drawText(text, xi, yi, size, rl.getColor(if (output) b.rgba else label_color));
 }
