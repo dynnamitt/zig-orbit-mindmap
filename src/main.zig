@@ -26,7 +26,7 @@ const ring_colors = [2]u32{ 0xFFB000FF, 0x3FC8D0FF };
 const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
-const tube_sides = 6; // faded rings' and links' tubes
+const tube_sides = 4; // faded rings' and links' tubes: too thin to look square
 const link_width = 0.05; // tube radius
 const link_alpha = 0.35;
 const link_off_thin = 0.5; // × link_width
@@ -198,6 +198,9 @@ var touch: sim.TouchSteer = .{};
 /// This frame's interpolation weight and camera position, for the draw callbacks.
 var alpha: f32 = 0;
 var eye: sim.Vec3 = undefined;
+/// This frame's camera axes, unit: forward, right, up. The pitch clamp keeps
+/// forward off vertical.
+var view: [3]sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
 /// The window size the camera is framed for (see `resize`).
 var view_size: [2]i32 = undefined;
@@ -291,6 +294,9 @@ fn frame() callconv(.c) void {
     // jitters against them.
     cam.target = drawnOf(ecs.id(sim.Barycenter));
     eye = cam.eye();
+    const fwd = sim.normalize(cam.target - eye);
+    const right = sim.normalize(sim.cross(fwd, .{ 0, 1, 0 }));
+    view = .{ fwd, right, sim.cross(right, fwd) };
 
     frame_camera = .{
         .position = vec3(eye),
@@ -304,7 +310,7 @@ fn frame() callconv(.c) void {
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
-    drawSky(frame_camera);
+    drawSky();
     rl.beginMode3D(frame_camera);
     forEachDrawn(cords, drawCord);
     forEachDrawn(balls, drawUnlitBall);
@@ -495,8 +501,10 @@ fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const ring = ecs.get(world, e, sim.Slot).?.ring;
     const off = sim.ringGap(at, cam.target, ring) > ecs.get(world, e, sim.Ball).?.radius;
     const base = rl.getColor(ring_colors[ring]);
-    const color = if (off) rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) else rl.colorAlpha(base, link_alpha);
-    const width: f32 = if (off) link_width * link_off_thin else link_width;
+    const width: f32, const color = if (off)
+        .{ link_width * link_off_thin, rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) }
+    else
+        .{ link_width, rl.colorAlpha(base, link_alpha) };
     const dir = sim.normalize(d);
     var t: f32 = 0;
     while (t < len) : (t += dash_len + dash_gap) {
@@ -516,11 +524,9 @@ fn drawStartRings() void {
 
 /// The starfield, added onto the cleared background. It turns with the
 /// camera: sky.fs gets the camera's axes, scaled to the field of view.
-fn drawSky(camera: rl.Camera3D) void {
-    const tan_h = @tan(std.math.degreesToRadians(camera.fovy / 2));
-    const fwd = sim.normalize(cam.target - eye);
-    const right = sim.normalize(sim.cross(fwd, .{ 0, 1, 0 }));
-    const axes = [3][3]f32{ fwd, right * sim.splat(tan_h * aspect()), sim.cross(right, fwd) * sim.splat(tan_h) };
+fn drawSky() void {
+    const tan_h = @tan(std.math.degreesToRadians(frame_camera.fovy / 2));
+    const axes = [3][3]f32{ view[0], view[1] * sim.splat(tan_h * aspect()), view[2] * sim.splat(tan_h) };
     const res = [2]f32{ @floatFromInt(rl.getRenderWidth()), @floatFromInt(rl.getRenderHeight()) };
     const time: f32 = @floatCast(rl.getTime());
     rl.setShaderValue(sky, sky_loc.resolution, &res, .vec2);
@@ -537,8 +543,7 @@ fn drawSky(camera: rl.Camera3D) void {
 
 /// A body's name on screen beside its sphere; none behind the camera.
 fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
-    const forward = cam.target - eye;
-    if (sim.dot(at - eye, forward) <= 0) return;
+    if (sim.dot(at - eye, view[0]) <= 0) return;
     const b = ecs.field(it, sim.Ball, 2).?[i];
     const text = ecs.field(it, sim.Label, 3).?[i].text;
     const center = rl.getWorldToScreen(vec3(at), frame_camera);
@@ -548,8 +553,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const h: f32 = @floatFromInt(screenSize()[1]);
     if (!(@abs(center.x) < 4 * w and @abs(center.y) < 4 * h)) return; // also skips NaN
     // The sphere's on-screen radius: project a point on its right edge.
-    const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
-    const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
+    const edge = rl.getWorldToScreen(vec3(at + view[1] * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
     const output = ecs.has_id(it.world, it.entities()[i], ecs.pair(ecs.id(sim.Cord), ecs.Wildcard));
     const base: f32 = if (output) output_font_size else label_font_size;
@@ -649,13 +653,8 @@ fn drawPlanet(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 /// A gray circle around a mother that always faces the camera.
 fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const r = ecs.field(it, sim.Ball, 2).?[i].radius * ring_scale;
-    // Axes from the camera's own view direction, which the pitch clamp keeps
-    // off vertical (the direction to the mother itself may not be).
-    const view = cam.target - eye;
-    const right = sim.cross(view, .{ 0, 1, 0 });
-    const u = sim.normalize(right) * sim.splat(r);
-    const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
-    drawCircle(at, u, v, ring_segments, 1, 0, rl.getColor(link_gray));
+    // The camera's own axes (the direction to the mother itself may be vertical).
+    drawCircle(at, view[1] * sim.splat(r), view[2] * sim.splat(r), ring_segments, 1, 0, rl.getColor(link_gray));
 }
 
 /// A circle around `center` spanned by the radius vectors `u` and `v`, in

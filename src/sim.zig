@@ -770,13 +770,15 @@ pub fn ringDir(angle: f32) Vec3 {
     return rotate(.{ @cos(angle), 0, -@sin(angle) }, planet_tilt_axis, planet_tilt);
 }
 
+/// The planets' (tilted) plane's normal: up, for `ringDir`'s counter-clockwise.
+const ring_normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
+
 /// How far `p` is from planet ring `ring` drawn around `center`: 0 on the
 /// circle itself, a planet's radius when its sphere just touches it.
 pub fn ringGap(p: Vec3, center: Vec3, ring: u1) f32 {
     const d = p - center;
-    const up = cross(ringDir(0), ringDir(std.math.pi / 2.0)); // the ring plane's normal
-    const h = dot(d, up);
-    return std.math.hypot(length(d - up * splat(h)) - ringRadius(ring), h);
+    const h = dot(d, ring_normal);
+    return std.math.hypot(length(d - ring_normal * splat(h)) - ringRadius(ring), h);
 }
 
 /// `n` planets laid out by `planetSlot` around the current barycenter (so
@@ -1110,7 +1112,7 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
         register(world);
         const sc = spawnScene(world, n);
         const f = ecs.get(world, ecs.id(StarField), StarField).?;
-        const normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
+        const normal = ring_normal;
         var speed = [2]?f32{ null, null };
         var inward = [2]f32{ 0, 0 };
         var on_ring = [2]f32{ 0, 0 };
@@ -1402,7 +1404,7 @@ fn slotOff(world: *ecs.world_t, e: ecs.entity_t) f32 {
 test "ringGap: distance to the ring's circle, in and out of its plane" {
     const c: Vec3 = .{ 1, 2, 3 };
     const r = ringRadius(1);
-    const up = cross(ringDir(0), ringDir(std.math.pi / 2.0));
+    const up = ring_normal;
     try expectApproxEqAbs(@as(f32, 0), ringGap(c + ringDir(0.7) * splat(r), c, 1), 1e-4);
     try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(2) * splat(r + 0.5), c, 1), 1e-4);
     try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(4) * splat(r) + up * splat(0.5), c, 1), 1e-4);
