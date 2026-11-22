@@ -43,6 +43,9 @@ const beam_sides = 10;
 // Labels: screen-space text beside each named body, drawn after bloom.
 const label_color = 0xE0D8C8FF; // pale sand
 const label_font_size = 16; // at the default zoom and further out
+/// Outputs (labelled stars): larger, in their star's own green. 20 is 2x
+/// raylib's 10 px default font, so it stays crisp.
+const output_font_size = 20;
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
 const label_zoom_follow = 0.8;
 const label_gap = 4; // pixels from the sphere's edge
@@ -479,14 +482,16 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
     const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
+    const output = ecs.has_id(it.world, it.entities()[i], ecs.id(sim.Star));
+    const base: f32 = if (output) output_font_size else label_font_size;
     const zoom = @max(1, cam.zoomFactor());
-    const size: i32 = @intFromFloat(@round(label_font_size * std.math.pow(f32, zoom, label_zoom_follow)));
+    const size: i32 = @intFromFloat(@round(base * std.math.pow(f32, zoom, label_zoom_follow)));
     const text_w: f32 = @floatFromInt(rl.measureText(text, size));
     // Right of the sphere, or left of it where the right would run off
     // screen; never past the left edge either.
     const x = @max(0, if (center.x + offset + text_w > w) center.x - offset - text_w else center.x + offset);
     const y = center.y - @as(f32, @floatFromInt(size)) / 2;
-    rl.drawText(text, @intFromFloat(x), @intFromFloat(y), size, rl.getColor(label_color));
+    rl.drawText(text, @intFromFloat(x), @intFromFloat(y), size, rl.getColor(if (output) b.rgba else label_color));
 }
 
 /// Hands this frame's stars (drawn positions, colour × share of the mass) to
