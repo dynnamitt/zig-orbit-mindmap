@@ -53,7 +53,7 @@ pub const max_stars = 16;
 // centre on crossed lines. The paths are shifted so the barycenter stays on
 // the mother's `Home`; moving stars shrink toward the centre.
 const dance_period = 2.4; // seconds per cycle
-const dance_shrink = 0.3; // scale at the centre
+const dance_shrink = 0.55; // scale at the centre
 const switch_time = 1.2;
 const switch_coast = 0.3;
 /// Triangle corners' distance from its centre: corner to corner is a cord's rest length.
