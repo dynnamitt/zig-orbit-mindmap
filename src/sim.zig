@@ -507,8 +507,8 @@ pub const Gesture = union(enum) {
 /// One finger, as the platform reports it.
 pub const Touch = struct { id: i32, x: f32, y: f32 };
 
-/// Turns raw pointer input into gestures: the left mouse button or one
-/// finger drags, two fingers pinch. Fingers are followed by id, frame to
+/// Turns raw pointer input into gestures: one finger (or, with no finger
+/// down, the left mouse button) drags, two fingers pinch. Fingers are followed by id, frame to
 /// frame: a finger that just landed, or a pair that just changed (a finger
 /// lifted or joined), does nothing until it moves on from there. Positions
 /// are never compared across different fingers, so the camera never jumps.
@@ -525,7 +525,9 @@ pub const TouchSteer = struct {
             @memcpy(self.before[0..n], touches[0..n]);
             self.n_before = n;
         }
-        if (mouse_down) return .{ .drag = mouse_delta };
+        // Fingers first: on web, emscripten's GLFW also reports a touch as a
+        // held left button, which would turn a pinch into a zero drag.
+        if (n == 0) return if (mouse_down) .{ .drag = mouse_delta } else .none;
         if (n == 1 and self.n_before == 1 and touches[0].id == self.before[0].id)
             return .{ .drag = .{ touches[0].x - self.before[0].x, touches[0].y - self.before[0].y } };
         if (n == 2 and self.n_before == 2 and samePair(touches[0..2], &self.before)) {
@@ -1078,8 +1080,9 @@ test "TouchSteer: a finger drags by its own movement, from its second frame" {
 test "TouchSteer: pinch only within the same pair of fingers" {
     var t: TouchSteer = .{};
     const a: Touch = .{ .id = 1, .x = 0, .y = 0 };
-    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 2, .x = 100, .y = 0 } }, false, .{ 0, 0 }));
-    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(&.{ a, .{ .id = 2, .x = 150, .y = 0 } }, false, .{ 0, 0 }));
+    try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 2, .x = 100, .y = 0 } }, true, .{ 0, 0 }));
+    // The left button reads as held during a touch on web: fingers win.
+    try expectEqual(Gesture{ .pinch = 1.5 }, t.update(&.{ a, .{ .id = 2, .x = 150, .y = 0 } }, true, .{ 0, 0 }));
     // Finger 2 lifts and finger 3 slides into its slot: no 4x zoom jump.
     try expectEqual(Gesture.none, t.update(&.{ a, .{ .id = 3, .x = 600, .y = 0 } }, false, .{ 0, 0 }));
     try expectEqual(Gesture{ .pinch = 0.5 }, t.update(&.{ a, .{ .id = 3, .x = 300, .y = 0 } }, false, .{ 0, 0 }));
