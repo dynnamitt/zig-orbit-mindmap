@@ -654,6 +654,20 @@ pub fn motherQuery(world: *ecs.world_t) !*ecs.query_t {
     });
 }
 
+/// Query over every star (what glows): term 0 = `Position`, term 1 =
+/// optional `PrevPosition`, term 2 = `Ball`, as `ballQuery`.
+/// Caller owns it (`ecs.query_fini`).
+pub fn starQuery(world: *ecs.world_t) !*ecs.query_t {
+    return ecs.query_init(world, &.{
+        .terms = [_]ecs.term_t{
+            .{ .id = ecs.id(Position) },
+            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
+            .{ .id = ecs.id(Ball) },
+            .{ .id = ecs.id(Star) },
+        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
+    });
+}
+
 /// Query over every drawable entity: term 0 = `Position`, term 1 = optional
 /// `PrevPosition` (null field for static entities), term 2 = `Ball`.
 /// Caller owns it (`ecs.query_fini`).
@@ -1044,6 +1058,14 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     }
     try expect(mother_ok);
     try expectEqual(@as(usize, 1), mothers);
+
+    // Stars (what glows): the mother and her children, no planets.
+    const sq = try starQuery(world);
+    defer ecs.query_fini(sq);
+    var stars: usize = 0;
+    var sit = ecs.query_iter(world, sq);
+    while (ecs.query_next(&sit)) stars += sit.count();
+    try expectEqual(1 + c.children.len, stars);
 
     const cords = try linkQuery(world, Cord);
     defer ecs.query_fini(cords);

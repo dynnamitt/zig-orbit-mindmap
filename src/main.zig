@@ -24,6 +24,20 @@ const ring_scale = 2.2;
 const ring_segments = 48;
 
 const fovy = 45; // degrees, vertical
+
+// Bloom: stars and cords are also drawn into a smaller glow texture, which is
+// blurred and added on top of the scene. Gray links, rings and planets stay
+// out of it.
+const glow_downscale = 2; // glow texture size = window size / this
+/// Glowing spheres are drawn this much larger than the stars, for a wider aura.
+const glow_grow = 1.4;
+/// Horizontal + vertical blur rounds; each widens the aura.
+const blur_rounds = 2;
+/// Glow texels between blur taps (wider is softer; above ~2 it shows bands).
+const blur_spread = 1.5;
+/// How many times the glow is added: brightness of the aura.
+const glow_layers = 1;
+const blur_fs = if (builtin.os.tag == .emscripten) @embedFile("shaders/blur.100.fs") else @embedFile("shaders/blur.330.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -77,6 +91,11 @@ var balls: *ecs.query_t = undefined;
 var cords: *ecs.query_t = undefined;
 var inputs: *ecs.query_t = undefined;
 var mothers: *ecs.query_t = undefined;
+var stars: *ecs.query_t = undefined;
+/// Glow textures: the stars drawn into [0], then blurred back and forth.
+var glow: [2]rl.RenderTexture2D = undefined;
+var blur: rl.Shader = undefined;
+var blur_tap: i32 = undefined;
 var cam: sim.OrbitCam = undefined;
 var touch: sim.TouchSteer = .{};
 /// This frame's interpolation weight and camera position, for the draw callbacks.
@@ -104,6 +123,17 @@ pub fn main() !void {
     defer ecs.query_fini(inputs);
     mothers = try sim.motherQuery(world);
     defer ecs.query_fini(mothers);
+    stars = try sim.starQuery(world);
+    defer ecs.query_fini(stars);
+
+    for (&glow) |*g| {
+        g.* = try rl.loadRenderTexture(width / glow_downscale, height / glow_downscale);
+        rl.setTextureFilter(g.texture, .bilinear); // smooth when scaled up
+    }
+    defer for (glow) |g| rl.unloadRenderTexture(g);
+    blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
+    defer rl.unloadShader(blur);
+    blur_tap = rl.getShaderLocation(blur, "tap");
 
     if (builtin.os.tag == .emscripten) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -130,24 +160,29 @@ fn frame() callconv(.c) void {
     cam.target = drawnOf(ecs.id(sim.Barycenter));
     eye = cam.eye();
 
-    rl.beginDrawing();
-    defer rl.endDrawing();
-    rl.clearBackground(rl.getColor(background));
-
-    rl.beginMode3D(.{
+    const camera: rl.Camera3D = .{
         .position = vec3(eye),
         .target = vec3(cam.target),
         .up = .{ .x = 0, .y = 1, .z = 0 },
         .fovy = fovy,
         .projection = .perspective,
-    });
-    // Glowing geometry (cords, then stars and planets), then the gray links
-    // and rings, which #6's bloom pass will leave out.
+    };
+    glowPass(camera);
+
+    rl.beginDrawing();
+    defer rl.endDrawing();
+    rl.clearBackground(rl.getColor(background));
+    rl.beginMode3D(camera);
     forEachDrawn(cords, drawCord);
     forEachDrawn(balls, drawBall);
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
     rl.endMode3D();
+
+    // The blurred glow, added on top.
+    rl.beginBlendMode(.additive);
+    for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = width, .height = height }, .{ .x = 0, .y = 0 }, 0, .white);
+    rl.endBlendMode();
 
     // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
     // last draw batch first so it counts. GPU time isn't measured (GL runs
@@ -160,6 +195,44 @@ fn frame() callconv(.c) void {
     var buf: [stats_buf_len]u8 = undefined;
     drawStat(std.fmt.bufPrintSentinel(&buf, "{d} FPS", .{rl.getFPS()}, 0) catch unreachable, 0);
     drawStat(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
+}
+
+/// Stars (a bit larger) and cords into glow[0], then blurred there.
+fn glowPass(camera: rl.Camera3D) void {
+    rl.beginTextureMode(glow[0]);
+    rl.clearBackground(.black);
+    rl.beginMode3D(camera);
+    forEachDrawn(cords, drawCord);
+    forEachDrawn(stars, drawGlowBall);
+    rl.endMode3D();
+    rl.endTextureMode();
+
+    const texel = 1.0 / @as(f32, width / glow_downscale);
+    const texel_y = 1.0 / @as(f32, height / glow_downscale);
+    for (0..blur_rounds) |_| {
+        blurInto(glow[0], glow[1], .{ texel * blur_spread, 0 });
+        blurInto(glow[1], glow[0], .{ 0, texel_y * blur_spread });
+    }
+}
+
+/// `src` blurred along `tap` (texture coordinates per tap) into `dst`.
+fn blurInto(src: rl.RenderTexture2D, dst: rl.RenderTexture2D, tap: [2]f32) void {
+    rl.beginTextureMode(dst);
+    rl.beginShaderMode(blur);
+    rl.setShaderValue(blur, blur_tap, &tap, .vec2);
+    rl.drawTextureRec(src.texture, flipped(src), .{ .x = 0, .y = 0 }, .white);
+    rl.endShaderMode();
+    rl.endTextureMode();
+}
+
+/// A render texture's whole area, upside down: GL stores it bottom-up.
+fn flipped(t: rl.RenderTexture2D) rl.Rectangle {
+    return .{ .x = 0, .y = 0, .width = @floatFromInt(t.texture.width), .height = -@as(f32, @floatFromInt(t.texture.height)) };
+}
+
+fn drawGlowBall(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    rl.drawSphere(vec3(at), b.radius * glow_grow, rl.getColor(b.rgba));
 }
 
 /// Mouse or one finger turns the camera, the wheel or two fingers zoom.
