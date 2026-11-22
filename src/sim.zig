@@ -32,7 +32,12 @@ const repel_soft = 0.25;
 /// Children start this far off their rest length (fractions of it), so the
 /// wobble starts uneven. They start level with the mother: a tilted cluster
 /// would slowly turn the planets' orbits about its own axis.
-const child_stretch = [_]f32{ 0.15, -0.1, 0.05 };
+const ChildData = struct { name: [:0]const u8, stretch: f32 };
+const children = [_]ChildData{
+    .{ .name = "native binary", .stretch = 0.15 },
+    .{ .name = "index.wasm", .stretch = -0.1 },
+    .{ .name = "Pages site", .stretch = 0.05 },
+};
 /// Most stars the `cluster` system handles (it works on all of them at once).
 const max_stars = 16;
 
@@ -59,14 +64,31 @@ const planet_radius = 0.35;
 const planet_tilt = 0.06;
 /// Every planet orbit tilts `planet_tilt` about this axis.
 const planet_tilt_axis: Vec3 = .{ 1, 0, 0 };
-// One colour per planet: the tech-trio.svg palette (teal, orange, sand, light
-// gray) with lighter, darker and nearby shades; cycled past twelve planets.
-const planet_colors = [_]u32{
-    0x2E7E7EFF, 0xC87137FF, 0xC8A878FF, 0xD1D1D1FF, 0x5AA6A6FF, 0xE0A070FF,
-    0x8FD0D0FF, 0x9C5A1EFF, 0xE8D5B0FF, 0x8A8A8AFF, 0xD9531EFF, 0x5F8FB0FF,
+// The sample IPO: this project's own build. The mother is `zig build` (the
+// process, unlabelled); the planets are its inputs and her children its
+// outputs. Planet colours: the tech-trio.svg palette (teal, orange, sand,
+// light gray) with lighter, darker and nearby shades. Cycled past the table
+// (tests spawn more).
+const PlanetData = struct { name: [:0]const u8, rgba: u32 };
+const planets = [_]PlanetData{
+    .{ .name = "main.zig", .rgba = 0x2E7E7EFF },
+    .{ .name = "sim.zig", .rgba = 0xC87137FF },
+    .{ .name = "build.zig", .rgba = 0xC8A878FF },
+    .{ .name = "build.zig.zon", .rgba = 0xD1D1D1FF },
+    .{ .name = "raylib", .rgba = 0x5AA6A6FF },
+    .{ .name = "flecs", .rgba = 0xE0A070FF },
+    .{ .name = "emsdk", .rgba = 0x8FD0D0FF },
+    .{ .name = "shell.html", .rgba = 0x9C5A1EFF },
+    .{ .name = "blur.fs", .rgba = 0xE8D5B0FF },
+    .{ .name = "stamp.sh", .rgba = 0x8A8A8AFF },
+    .{ .name = "ci.yml", .rgba = 0xD9531EFF },
+    .{ .name = "zig 0.17", .rgba = 0x5F8FB0FF },
 };
 /// Planets in the scene.
-pub const planet_count = planet_colors.len;
+pub const planet_count = planets.len;
+/// Rings the scene's planets start on: the default one, plus the bumped one
+/// past `planet_ring_max`.
+pub const planet_rings: u2 = if (planet_count > planet_ring_max) 2 else 1;
 /// How far the planets reach from the barycenter, for framing.
 pub const system_radius = planet_ring_r + (if (planet_count > planet_ring_max) planet_ring_bump else 0) + planet_radius;
 
@@ -77,7 +99,7 @@ const stats_window = 0.5;
 /// A SIMD vector, so arithmetic is element-wise (`a + b`, `a * @as(Vec3, @splat(k))`).
 pub const Vec3 = @Vector(3, f32);
 
-fn dot(a: Vec3, b: Vec3) f32 {
+pub fn dot(a: Vec3, b: Vec3) f32 {
     return @reduce(.Add, a * b);
 }
 
@@ -153,6 +175,8 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
+/// A name to show next to a body (planets and child stars).
+pub const Label = struct { text: [:0]const u8 };
 /// Tag: the mother star (the IPO's process). Her children hang on cords;
 /// planets are her inputs.
 pub const Mother = struct {};
@@ -193,6 +217,7 @@ pub fn register(world: *ecs.world_t) void {
     ecs.TAG(world, Barycenter);
     ecs.COMPONENT(world, StarField);
     ecs.TAG(world, Planet);
+    ecs.COMPONENT(world, Label);
     ecs.TAG(world, Mother);
     ecs.TAG(world, InputOf);
     // Before any star exists: system terms on singletons need them to match.
@@ -599,7 +624,7 @@ pub const TouchSteer = struct {
     }
 };
 
-pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]ecs.entity_t };
+pub const Cluster = struct { mother: ecs.entity_t, children: [children.len]ecs.entity_t };
 
 /// The mother star at `at`, anchored there, and her children spread evenly
 /// around her on cords, each started a little off rest so the cluster wobbles.
@@ -607,19 +632,20 @@ pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]
 /// `barycenter` system will after each step.
 pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     var c: Cluster = undefined;
-    var f: StarField = .{ .n = 1 + child_stretch.len };
+    var f: StarField = .{ .n = 1 + children.len };
     c.mother = spawnStar(world, at, mother_mass, mother_radius, mother_white);
     ecs.add(world, c.mother, Mother);
     set(world, c.mother, Home, .{ .v = at });
     f.pos[0] = at;
     f.mass[0] = mother_mass;
 
-    for (&c.children, child_stretch, 1..) |*child, stretch, i| {
-        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / child_stretch.len;
-        const r = cord_rest * (1 + stretch);
+    for (&c.children, children, 1..) |*child, data, i| {
+        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / children.len;
+        const r = cord_rest * (1 + data.stretch);
         const p = at + Vec3{ r * @cos(angle), 0, -r * @sin(angle) };
         child.* = spawnStar(world, p, child_mass, child_radius, child_green);
         setPair(world, child.*, Cord, c.mother, .{ .rest = cord_rest });
+        set(world, child.*, Label, .{ .text = data.name });
         f.pos[i] = p;
         f.mass[i] = child_mass;
     }
@@ -647,10 +673,21 @@ fn planetSlot(i: usize, n: usize) PlanetSlot {
     const phase = std.math.tau * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
     return .{
         .ring = ring,
-        .r = planet_ring_r + @as(f32, @floatFromInt(ring)) * planet_ring_bump,
-        .dir = rotate(.{ @cos(phase), 0, -@sin(phase) }, planet_tilt_axis, planet_tilt),
-        .along = rotate(.{ -@sin(phase), 0, -@cos(phase) }, planet_tilt_axis, planet_tilt),
+        .r = ringRadius(ring),
+        .dir = ringDir(phase),
+        .along = ringDir(phase + std.math.pi / 2.0),
     };
+}
+
+/// Radius of planet ring 0 (default) or 1 (bumped).
+pub fn ringRadius(ring: u1) f32 {
+    return planet_ring_r + @as(f32, @floatFromInt(ring)) * planet_ring_bump;
+}
+
+/// Unit vector at `angle` on the (tilted) planet plane: 0 along +x, then
+/// counter-clockwise seen from above.
+pub fn ringDir(angle: f32) Vec3 {
+    return rotate(.{ @cos(angle), 0, -@sin(angle) }, planet_tilt_axis, planet_tilt);
 }
 
 /// `n` planets laid out by `planetSlot` around the current barycenter (so
@@ -672,19 +709,20 @@ pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize
         // v²/r = inward pull; plus the barycenter's own drift, so the orbit is
         // circular around it.
         const speed = @sqrt(@max(0, inward[slot.ring] / on_ring[slot.ring]) * slot.r);
-        e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planet_colors[i % planet_colors.len]);
+        e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planets[i % planets.len]);
     }
     return out;
 }
 
-fn spawnPlanet(world: *ecs.world_t, mother: ecs.entity_t, p: Vec3, v: Vec3, rgba: u32) ecs.entity_t {
+fn spawnPlanet(world: *ecs.world_t, mother: ecs.entity_t, p: Vec3, v: Vec3, data: PlanetData) ecs.entity_t {
     const e = ecs.new_id(world);
     set(world, e, Position, .{ .v = p });
     set(world, e, PrevPosition, .{ .v = p });
     set(world, e, Velocity, .{ .v = v });
     ecs.add(world, e, Planet);
     ecs.add_pair(world, e, ecs.id(InputOf), mother);
-    set(world, e, Ball, .{ .radius = planet_radius, .rgba = rgba });
+    set(world, e, Ball, .{ .radius = planet_radius, .rgba = data.rgba });
+    set(world, e, Label, .{ .text = data.name });
     return e;
 }
 
@@ -877,7 +915,7 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
         }
         // The singleton is the mass-weighted mean, and remembers the step before.
         const b = positionOf(world, ecs.id(Barycenter));
-        try expect(distance(b, sum / splat(mother_mass + child_mass * @as(f32, child_stretch.len))) < 1e-4);
+        try expect(distance(b, sum / splat(mother_mass + child_mass * @as(f32, children.len))) < 1e-4);
         try expectEqual(before, ecs.get(world, ecs.id(Barycenter), PrevPosition).?.v);
         drift = @max(drift, distance(b, home));
     }
@@ -992,7 +1030,8 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
             on_ring[slot.ring] += 1;
             const b = ecs.get(world, e, Ball).?;
             try expectEqual(@as(f32, planet_radius), b.radius);
-            try expectEqual(planet_colors[i % planet_colors.len], b.rgba);
+            try expectEqual(planets[i % planets.len].rgba, b.rgba);
+            try std.testing.expectEqualStrings(planets[i % planets.len].name, ecs.get(world, e, Label).?.text);
         }
         // That speed is circular for the ring's mean inward pull: v² = pull · r.
         for (0..2) |ring| if (speed[ring]) |v| {
@@ -1074,14 +1113,14 @@ test "ballQuery yields every star and planet, all moving" {
         n += it.count();
         if (ecs.field(&it, PrevPosition, 1) != null) with_prev += it.count();
     }
-    const total = 1 + child_stretch.len + planet_count;
+    const total = 1 + children.len + planet_count;
     try expectEqual(total, n);
     try expectEqual(total, with_prev);
 }
 
 test "worker threads give the same result as one thread" {
-    const planets = 200;
-    var runs: [2][planets]Vec3 = undefined;
+    const many = 200;
+    var runs: [2][many]Vec3 = undefined;
     // zflecs allows one world at a time, so run them one after the other.
     for (&runs, [_]i32{ 0, 4 }) |*out, threads| {
         const world = ecs.init();
@@ -1089,7 +1128,7 @@ test "worker threads give the same result as one thread" {
         register(world);
         if (threads > 0) ecs.set_threads(world, threads);
         // Many planets (two rings), so pull splits across workers.
-        const sc = spawnScene(world, planets);
+        const sc = spawnScene(world, many);
         step(world, 600);
         for (out, sc.ps) |*p, e| p.* = positionOf(world, e);
     }
@@ -1217,4 +1256,36 @@ test "OrbitCam: portrait framing backs off so the scene fits across" {
     cam.reframe(450.0 / 800.0, 800.0 / 450.0);
     cam.reframe(800.0 / 450.0, 450.0 / 800.0);
     try expectApproxEqAbs(far, cam.distance, 1e-3);
+}
+
+test "labels: every planet and child star, never the mother" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    try expect(!ecs.has_id(world, sc.c.mother, ecs.id(Label)));
+    for (sc.c.children, children) |e, data| try std.testing.expectEqualStrings(data.name, ecs.get(world, e, Label).?.text);
+
+    // ballQuery with Label finds exactly those, with Ball at term 2 and
+    // Label at term 3 for the renderer.
+    const q = try ballQuery(world, Label);
+    defer ecs.query_fini(q);
+    var n: usize = 0;
+    var it = ecs.query_iter(world, q);
+    while (ecs.query_next(&it)) n += it.count();
+    try expectEqual(planet_count + children.len, n);
+}
+
+test "ringDir/ringRadius trace the rings planets start on" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    for (sc.ps, 0..) |e, i| {
+        const slot = planetSlot(i, planet_count);
+        const phase = std.math.tau * @as(f32, @floatFromInt(i)) / planet_count;
+        try expect(distance(positionOf(world, e), f.center + ringDir(phase) * splat(ringRadius(slot.ring))) < 1e-3);
+    }
+    try expectEqual(@as(u2, 2), planet_rings); // 12 planets: two rings
 }
