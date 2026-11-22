@@ -48,6 +48,7 @@ Current scene: `spawnCluster` (a warm-white `Mother` star and three green childr
 - `snapshot` (`OnLoad`): `PrevPosition = Position`, for interpolation.
 - `cluster` (`PreUpdate`, run system): cord springs, a soft push between every pair of stars, and the mother's `Home` spring. Undamped on purpose: the cluster keeps wobbling.
 - `pull` (`PreUpdate`, per table): every star's gravity on each `Planet`, read from the `StarField` singleton, plus a deliberate damping of radial motion relative to the barycenter that keeps the orbits from drifting chaotically (why and how much: comments at the top of `sim.zig`).
+- `thrust` (`PreUpdate`, after `pull`): each planet's `Slot` (ring radius, phase turning at the ring's speed) keeps its place and the even spacing; past `thrust_on` × radius from it the planet's `Thruster` fires a capped damped spring back until within `thrust_off` (hysteresis). main draws a nozzle disc and, while firing, a pulsing exhaust beam (both glow).
 - `move` (`OnUpdate`): position from velocity. Velocity changes in `PreUpdate` and `move` after it make semi-implicit Euler, which keeps orbits and springs bounded; keep that phase order if you add systems.
 - `barycenter` (`PostUpdate`, run system): publishes `StarField` (every star's position and mass, the barycenter and its drift) and the `Position` of the entity `ecs.id(Barycenter)`. `spawnCluster` seeds both. main interpolates that entity like a ball and points the camera at it.
 
