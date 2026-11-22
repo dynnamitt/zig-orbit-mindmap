@@ -462,21 +462,44 @@ pub const OrbitCam = struct {
     const zoom_speed = 0.1;
     /// Just short of straight up or down, where the view's up vector flips.
     const max_pitch = std.math.pi / 2.0 - 0.05;
-    // Distances, as multiples of the radius `framing` is given: at 45° fovy
-    // and 16:9, frame_distance just fits the radius across with some margin.
-    const frame_distance = 1.9;
+    // Distances, as multiples of the radius `framing` is given. In landscape
+    // frame_distance fits the tilted scene top to bottom with some margin;
+    // `fitDistance` backs off further where the width is the tighter fit.
+    const frame_distance = 2.2;
     const frame_min = 0.3;
     const frame_max = 5;
 
-    /// A camera on `target` that fits a scene `radius` across in its default
-    /// view, and zooms from close to the center to far away.
-    pub fn framing(target: Vec3, radius: f32) OrbitCam {
+    /// The scene radius across the screen's horizontal view gets at least
+    /// this much margin (in portrait, the full ring spans the narrow side).
+    const frame_fit = 1.1;
+
+    /// A camera on `target` that fits a scene `radius` in its default view of
+    /// a screen `aspect` (width / height) wide, and zooms from close to the
+    /// center to far away.
+    pub fn framing(target: Vec3, radius: f32, aspect: f32) OrbitCam {
         return .{
             .target = target,
-            .distance = radius * frame_distance,
+            .distance = fitDistance(radius, aspect),
             .min_distance = radius * frame_min,
             .max_distance = radius * frame_max,
         };
+    }
+
+    /// Default distance for a scene `radius` on a screen `aspect` wide: far
+    /// enough that it fits across the horizontal view too.
+    fn fitDistance(radius: f32, aspect: f32) f32 {
+        const half_fovx = scaleHalfAngle(std.math.degreesToRadians(fovyFor(aspect) / 2), aspect);
+        return radius * @max(frame_distance, frame_fit / @tan(half_fovx));
+    }
+
+    /// The screen's aspect went from `from` to `to`: keep the zoom relative
+    /// to the default framing, so a flip to portrait backs off just enough.
+    pub fn reframe(self: *OrbitCam, from: f32, to: f32) void {
+        const k = fitDistance(1, to) / fitDistance(1, from);
+        // The limits scale too, so flipping back restores the same zoom.
+        self.distance *= k;
+        self.min_distance *= k;
+        self.max_distance *= k;
     }
 
     /// Mouse moved by (`dx`, `dy`) pixels with the button held: the scene
@@ -491,6 +514,24 @@ pub const OrbitCam = struct {
     /// `notches` of mouse wheel; positive zooms in.
     pub fn zoom(self: *OrbitCam, notches: f32) void {
         self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), self.min_distance, self.max_distance);
+    }
+
+    /// View angle across the narrower side of the screen, degrees.
+    pub const narrow_fov = 45.0;
+
+    /// Vertical field of view (what raylib's Camera3D takes) for a screen
+    /// `aspect` (width / height) wide, so the narrower side always spans
+    /// `narrow_fov`: framing then fits the scene the same way in landscape
+    /// and portrait.
+    pub fn fovyFor(aspect: f32) f32 {
+        if (aspect >= 1) return narrow_fov;
+        return std.math.radiansToDegrees(2 * scaleHalfAngle(std.math.degreesToRadians(narrow_fov / 2.0), 1 / aspect));
+    }
+
+    /// The half view angle across a side `k` times as long as the one that
+    /// `half` spans (same distance from the eye).
+    fn scaleHalfAngle(half: f32, k: f32) f32 {
+        return std.math.atan(@tan(half) * k);
     }
 
     /// Two-finger pinch: the fingers are now `ratio` times as far apart as
@@ -775,7 +816,7 @@ test "FrameStats: publishes mean and max once per window, then restarts" {
 }
 
 test "OrbitCam: eye sits `distance` from the target, above it for positive pitch" {
-    var cam = OrbitCam.framing(.{ 1, 2, 3 }, 1);
+    var cam = OrbitCam.framing(.{ 1, 2, 3 }, 1, 800.0 / 450.0);
     cam.yaw = 0.7;
     cam.pitch = 0.4;
     cam.distance = 10;
@@ -783,13 +824,13 @@ test "OrbitCam: eye sits `distance` from the target, above it for positive pitch
     try expectApproxEqAbs(@as(f32, 10), distance(e, cam.target), 1e-4);
     try expectApproxEqAbs(@as(f32, 2 + 10 * @sin(0.4)), e[1], 1e-4);
     // Default yaw and level pitch look from +z.
-    var level = OrbitCam.framing(.{ 0, 0, 0 }, 1);
+    var level = OrbitCam.framing(.{ 0, 0, 0 }, 1, 800.0 / 450.0);
     level.pitch = 0;
     try expect(distance(level.eye(), .{ 0, 0, level.distance }) < 1e-4);
 }
 
 test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
-    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5, 800.0 / 450.0);
     cam.drag(0, 1e6);
     try expectEqual(OrbitCam.max_pitch, cam.pitch);
     cam.drag(0, -1e6);
@@ -802,7 +843,7 @@ test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
 }
 
 test "OrbitCam: zoom moves in and out within its limits" {
-    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5, 800.0 / 450.0);
     const start = cam.distance;
     cam.zoom(1);
     try expect(cam.distance < start);
@@ -1056,7 +1097,7 @@ test "worker threads give the same result as one thread" {
 }
 
 test "OrbitCam: pinch zooms by the finger-distance ratio, within limits" {
-    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5);
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5, 800.0 / 450.0);
     const start = cam.distance;
     cam.pinch(2); // fingers spread to twice as far apart
     try expectApproxEqAbs(start / 2, cam.distance, 1e-4);
@@ -1146,4 +1187,34 @@ test "Cord.radius: thicker when squeezed, thinner when stretched, clamped" {
     try expectApproxEqAbs(@as(f32, cord_radius / 1.728), c.radius(2.4), 1e-5); // (2/2.4)^3
     try expectEqual(@as(f32, cord_radius * cord_bulge_min), c.radius(100));
     try expectEqual(@as(f32, cord_radius * cord_bulge_max), c.radius(0));
+}
+
+test "OrbitCam.fovyFor: 45 degrees across the narrower side" {
+    try expectEqual(@as(f32, OrbitCam.narrow_fov), OrbitCam.fovyFor(800.0 / 450.0));
+    try expectEqual(@as(f32, OrbitCam.narrow_fov), OrbitCam.fovyFor(1));
+    // Portrait: the horizontal angle is the narrow one and stays 45 degrees.
+    const fovy = OrbitCam.fovyFor(450.0 / 800.0);
+    const half_x = std.math.atan(@tan(std.math.degreesToRadians(fovy / 2)) * 450 / 800);
+    try expectApproxEqAbs(@as(f32, 22.5), std.math.radiansToDegrees(half_x), 1e-3);
+    try expect(fovy > 70 and fovy < 75);
+}
+
+test "OrbitCam: portrait framing backs off so the scene fits across" {
+    const land = OrbitCam.framing(.{ 0, 0, 0 }, 10, 800.0 / 450.0);
+    const port = OrbitCam.framing(.{ 0, 0, 0 }, 10, 450.0 / 800.0);
+    try expectApproxEqAbs(@as(f32, 10 * OrbitCam.frame_distance), land.distance, 1e-4);
+    // Portrait: 45 degrees across; the radius plus margin fits half of it.
+    try expectApproxEqAbs(@as(f32, 10 * OrbitCam.frame_fit / @tan(std.math.degreesToRadians(22.5))), port.distance, 1e-3);
+    // Flipping keeps a user's zoom relative to the default.
+    var cam = land;
+    cam.zoom(2);
+    const zoomed = cam.distance / land.distance;
+    cam.reframe(800.0 / 450.0, 450.0 / 800.0);
+    try expectApproxEqAbs(zoomed, cam.distance / port.distance, 1e-4);
+    // Zoomed all the way out, flipping there and back keeps the zoom.
+    cam.zoom(-1000);
+    const far = cam.distance;
+    cam.reframe(450.0 / 800.0, 800.0 / 450.0);
+    cam.reframe(800.0 / 450.0, 450.0 / 800.0);
+    try expectApproxEqAbs(far, cam.distance, 1e-3);
 }
