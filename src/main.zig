@@ -499,7 +499,8 @@ fn ballDrawer(comptime scale: f32, comptime color: ?rl.Color) fn (*ecs.iter_t, u
     return struct {
         fn draw(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
             const b = ecs.field(it, sim.Ball, 2).?[i];
-            rl.drawSphere(vec3(at), b.radius * b.scale * scale, color orelse rl.getColor(b.rgba));
+            if (b.scale <= 0) return; // parked
+            rl.drawSphere(vec3(at), b.size() * scale, color orelse rl.getColor(b.rgba));
         }
     }.draw;
 }
@@ -590,7 +591,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const h: f32 = @floatFromInt(screenSize()[1]);
     if (!(@abs(center.x) < 4 * w and @abs(center.y) < 4 * h)) return; // also skips NaN
     // The sphere's on-screen radius: project a point on its right edge.
-    const edge = rl.getWorldToScreen(vec3(at + view[1] * sim.splat(b.radius * b.scale)), frame_camera);
+    const edge = rl.getWorldToScreen(vec3(at + view[1] * sim.splat(b.size())), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
     const output = ecs.has_id(it.world, it.entities()[i], ecs.pair(ecs.id(sim.Cord), ecs.Wildcard));
     const base: f32 = if (output) output_font_size else label_font_size;
@@ -610,7 +611,8 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     rl.drawText(text, xi, yi, size, rl.getColor(if (output) b.rgba else label_color));
 }
 
-/// Hands this frame's stars (drawn positions, colour × share of the mass) to
+/// Hands this frame's stars (drawn positions, colour × share of the mass,
+/// scaled like the star, so a parked output gives no light) to
 /// the planet shader.
 fn lightPlanets() void {
     star_n = 0;
@@ -627,8 +629,9 @@ fn lightPlanets() void {
 
 fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     if (star_n == sim.max_stars) return;
-    const mass = ecs.field(it, sim.Star, 3).?[i].mass;
-    const c = rl.getColor(ecs.field(it, sim.Ball, 2).?[i].rgba);
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    const mass = ecs.field(it, sim.Star, 3).?[i].mass * b.scale;
+    const c = rl.getColor(b.rgba);
     const k: usize = @intCast(star_n);
     star_pos[k] = .{ at[0], at[1], at[2] };
     star_light[k] = .{ @as(f32, @floatFromInt(c.r)) / 255 * mass, @as(f32, @floatFromInt(c.g)) / 255 * mass, @as(f32, @floatFromInt(c.b)) / 255 * mass };
@@ -690,7 +693,7 @@ fn drawPlanet(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 /// A gray circle around a mother that always faces the camera.
 fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const b = ecs.field(it, sim.Ball, 2).?[i];
-    const r = b.radius * b.scale * ring_scale;
+    const r = b.size() * ring_scale;
     // The camera's own axes (the direction to the mother itself may be vertical).
     drawCircle(at, view[1] * sim.splat(r), view[2] * sim.splat(r), ring_segments, 1, 0, rl.getColor(link_gray));
 }
@@ -717,7 +720,7 @@ fn drawSegment(a: sim.Vec3, b: sim.Vec3, width: f32, color: rl.Color) void {
 
 fn ringRadius(mother: ecs.entity_t) f32 {
     const b = ecs.get(world, mother, sim.Ball).?;
-    return b.radius * b.scale * ring_scale;
+    return b.size() * ring_scale;
 }
 
 /// `drawnAt` for an entity looked up by id.
@@ -749,14 +752,11 @@ fn drawStat(text: [:0]const u8, line: i32) void {
     rl.drawText(text, x, stats_margin + line * (stats_font_size + stats_line_gap), stats_font_size, rl.getColor(sand));
 }
 
-/// The output buttons' squares: −, then + (the count sits between them).
-fn outputButtons() [2]rl.Rectangle {
-    const size: f32 = ui_button;
-    const step: f32 = ui_button + ui_gap;
-    return .{
-        .{ .x = ui_left, .y = ui_top, .width = size, .height = size },
-        .{ .x = ui_left + 2 * step, .y = ui_top, .width = size, .height = size },
-    };
+/// The output buttons' cells, left to right: −, the count, +.
+fn outputButtons() [3]rl.Rectangle {
+    var cells: [3]rl.Rectangle = undefined;
+    for (&cells, 0..) |*c, k| c.* = .{ .x = @floatFromInt(ui_left + k * (ui_button + ui_gap)), .y = ui_top, .width = ui_button, .height = ui_button };
+    return cells;
 }
 
 /// Presses on the output buttons (a finger, or the mouse with none down):
@@ -772,14 +772,14 @@ fn pressOutputButtons() bool {
     }
     if (!ui_was_down) {
         const at = if (touching) rl.getTouchPosition(0) else rl.getMousePosition();
-        const b = outputButtons();
+        const cells = outputButtons();
         const n: usize = sim.outputs(world);
-        if (rl.checkCollisionPointRec(at, b[0])) {
+        if (rl.checkCollisionPointRec(at, cells[0])) {
             ui_hold = true;
-            _ = sim.setOutputs(world, n - 1);
-        } else if (rl.checkCollisionPointRec(at, b[1])) {
+            sim.setOutputs(world, n - 1);
+        } else if (rl.checkCollisionPointRec(at, cells[2])) {
             ui_hold = true;
-            _ = sim.setOutputs(world, n + 1);
+            sim.setOutputs(world, n + 1);
         }
     }
     return ui_hold;
@@ -788,18 +788,13 @@ fn pressOutputButtons() bool {
 /// − count +, top left; a button with nothing to do is grayed.
 fn drawOutputButtons() void {
     const n = sim.outputs(world);
-    const b = outputButtons();
-    drawButton(b[0], "-", n > 1);
-    drawButton(b[1], "+", n < sim.output_max);
+    const cells = outputButtons();
     var buf: [4]u8 = undefined;
     const count = std.fmt.bufPrintSentinel(&buf, "{d}", .{n}, 0) catch unreachable;
-    const x = b[0].x + b[0].width + (b[1].x - b[0].x - b[0].width - @as(f32, @floatFromInt(rl.measureText(count, ui_font_size)))) / 2;
-    rl.drawText(count, @intFromFloat(x), ui_top + (ui_button - ui_font_size) / 2, ui_font_size, rl.getColor(label_color));
-}
-
-fn drawButton(r: rl.Rectangle, text: [:0]const u8, enabled: bool) void {
-    const color = rl.getColor(if (enabled) sand else ui_disabled);
-    rl.drawRectangleLinesEx(r, ui_border, color);
-    const w = rl.measureText(text, ui_font_size);
-    rl.drawText(text, @as(i32, @intFromFloat(r.x)) + @divTrunc(ui_button - w, 2), @as(i32, @intFromFloat(r.y)) + (ui_button - ui_font_size) / 2, ui_font_size, color);
+    for (cells, [_][:0]const u8{ "-", count, "+" }, [_]?bool{ n > 1, null, n < sim.output_max }) |r, text, enabled| {
+        const color = rl.getColor(if (enabled) |on| (if (on) sand else ui_disabled) else label_color);
+        if (enabled != null) rl.drawRectangleLinesEx(r, ui_border, color);
+        const w = rl.measureText(text, ui_font_size);
+        rl.drawText(text, @as(i32, @intFromFloat(r.x)) + @divTrunc(ui_button - w, 2), @as(i32, @intFromFloat(r.y)) + (ui_button - ui_font_size) / 2, ui_font_size, color);
+    }
 }
