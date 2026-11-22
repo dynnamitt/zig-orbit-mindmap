@@ -104,8 +104,10 @@ const thrust_off = 0.02;
 const thrust_k = 2.0; // per s², toward the slot's position
 const thrust_damp = 2.8; // per s, toward the slot's velocity (~critical for k)
 const thrust_max = 1.6;
-/// Per second: how fast an idle nozzle swivels toward the push it would give.
+/// Per second: how fast an idle nozzle swivels toward the push it would give;
+/// below `thrust_aim_min` that push is too small to have a steady direction.
 const thrust_aim = 4.0;
+const thrust_aim_min = 0.05;
 
 /// How far the planets reach from the barycenter, for framing.
 pub const system_radius = planet_ring_r + (if (planet_count > planet_ring_max) planet_ring_bump else 0) + planet_radius;
@@ -418,15 +420,15 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
         if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
         var a = (target - p.v) * splat(thrust_k) + (target_v - v.v) * splat(thrust_damp);
         const n = length(a);
-        const push = if (n > 0) a / splat(n) else t.dir;
-        if (n > thrust_max) a *= splat(thrust_max / n);
+        const push = if (n > thrust_aim_min) a / splat(n) else t.dir;
         if (!t.on) {
             // Idle, the nozzle eases toward the push it would give, so it is
-            // already aimed when it fires (no snap at ignition).
+            // already (nearly) aimed when it fires: no visible snap.
             t.dir = normalize(std.math.lerp(t.dir, push, splat(aim)));
             t.time = 0;
             continue;
         }
+        if (n > thrust_max) a *= splat(thrust_max / n);
         t.dir = push;
         v.v += a * splat(dt);
         t.time += dt;
@@ -788,7 +790,7 @@ pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize
         const speed = @sqrt(@max(0, inward[slot.ring] / on_ring[slot.ring]) * slot.r);
         e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planets[i % planets.len]);
         set(world, e.*, Slot, .{ .r = slot.r, .phase = slot.phase, .omega = speed / slot.r });
-        set(world, e.*, Thruster, .{});
+        set(world, e.*, Thruster, .{ .dir = slot.along }); // trailing, until a push builds up
     }
     return out;
 }
@@ -1416,19 +1418,27 @@ test "thrusters: a displaced planet fires until it is back on its slot" {
     try expect(slotOff(world, p) < thrust_off + 0.01);
 }
 
-test "thrusters: an idle nozzle swivels toward the push it would give" {
+test "thrusters: nozzles are already aimed when they fire (no snap at ignition)" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
     const sc = spawnScene(world, planet_count);
-    const p = sc.ps[0];
-    const b = positionOf(world, ecs.id(Barycenter));
-    set(world, p, Position, .{ .v = b + (positionOf(world, p) - b) * splat(1.05) }); // 5% out: below thrust_on
-    step(world, 30);
-    const t = ecs.get(world, p, Thruster).?;
-    try expect(!t.on);
-    try expect(dot(t.dir, positionOf(world, p) - b) < 0); // aimed back in
-    try expectApproxEqAbs(@as(f32, 1), length(t.dir), 1e-4);
+    var prev: [planet_count]Thruster = undefined;
+    var ignitions: usize = 0;
+    var worst: f32 = 1;
+    for (0..60 * 60) |_| {
+        for (sc.ps, &prev) |e, *t| t.* = ecs.get(world, e, Thruster).?.*;
+        step(world, 1);
+        for (sc.ps, prev) |e, before| {
+            const t = ecs.get(world, e, Thruster).?;
+            if (t.on and !before.on) {
+                ignitions += 1;
+                worst = @min(worst, dot(before.dir, t.dir));
+            }
+        }
+    }
+    try expect(ignitions > 0);
+    try expect(worst > @cos(std.math.degreesToRadians(15.0))); // measured: 8°
 }
 
 test "thrusters: every planet stays near its slot (and the even spacing) for two minutes" {
