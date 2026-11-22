@@ -22,15 +22,19 @@ const ring_colors = [2]u32{ 0xFFB000FF, 0x3FC8D0FF };
 
 // Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
 // planet links are faded tube dashes from the planet to the mother's ring:
-// thinner and a little brighter while the planet is off its ring (not touching).
+// thinner and a little brighter while the planet is off its ring (not touching),
+// and each dash lit by the cluster (#35): brighter the nearer it is to the
+// barycenter, alpha × (floor + (1 - floor) / (1 + (d / d0)²)).
 const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
 const tube_sides = 4; // faded rings' and links' tubes: too thin to look square
 const link_width = 0.05; // tube radius
-const link_alpha = 0.35;
+const link_alpha = 0.8; // at the barycenter; ~0.4 at the inner ring
 const link_off_thin = 0.5; // × link_width
-const link_off_alpha = 0.5;
+const link_off_alpha = 1.0;
+const link_light_floor = 0.3;
+const link_light_d0 = 6.0; // world units
 const link_off_brighten = 0.2; // rl.colorBrightness
 /// The mother's ring: radius as a multiple of hers, leaving room for her glow.
 const ring_scale = 2.2;
@@ -503,24 +507,28 @@ fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const ring = ecs.field(it, sim.Slot, 3).?[i].ring;
     const off = sim.ringGap(at, cam.target, ring) > ecs.field(it, sim.Ball, 4).?[i].radius;
     const base = rl.getColor(ring_colors[ring]);
-    const width: f32, const color = if (off)
-        .{ link_width * link_off_thin, rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) }
+    const width: f32, const color, const peak: f32 = if (off)
+        .{ link_width * link_off_thin, rl.colorBrightness(base, link_off_brighten), link_off_alpha }
     else
-        .{ link_width, rl.colorAlpha(base, link_alpha) };
+        .{ link_width, base, link_alpha };
     const dir = sim.normalize(d);
     var t: f32 = 0;
     while (t < len) : (t += dash_len + dash_gap) {
-        drawSegment(at + dir * sim.splat(t), at + dir * sim.splat(@min(t + dash_len, len)), width, color);
+        const a = at + dir * sim.splat(t);
+        const b = at + dir * sim.splat(@min(t + dash_len, len));
+        const k = sim.length((a + b) * sim.splat(0.5) - cam.target) / link_light_d0;
+        const light = link_light_floor + (1 - link_light_floor) / (1 + k * k);
+        drawSegment(a, b, width, rl.colorAlpha(color, peak * light));
     }
 }
 
-/// The rings the planets are laid out on (and drift from), faded dashes in
-/// their theme colours around the current barycenter, which their orbits circle.
+/// The rings the planets are laid out on (and drift from): faded dashed
+/// ellipses in their theme colours, the current barycenter at a focus.
 fn drawStartRings() void {
     for (0..sim.planet_rings) |ring| {
-        const r = sim.splat(sim.ringRadius(@intCast(ring)));
+        const o = sim.ringOrbit(@intCast(ring));
         const color = rl.colorAlpha(rl.getColor(ring_colors[ring]), start_ring_alpha);
-        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, start_ring_width, color);
+        drawCircle(cam.target + o.center(), o.peri * sim.splat(o.a), o.side * sim.splat(o.b()), start_ring_segments, 2, start_ring_width, color);
     }
 }
 
@@ -662,7 +670,7 @@ fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     drawCircle(at, view[1] * sim.splat(r), view[2] * sim.splat(r), ring_segments, 1, 0, rl.getColor(link_gray));
 }
 
-/// A circle around `center` spanned by the radius vectors `u` and `v`, in
+/// A circle (or an ellipse) around `center` spanned by the radius vectors `u` and `v`, in
 /// `segments` straight pieces (`drawSegment`s of `width`): every one (`step`
 /// 1) or every other (2, dashed).
 fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, width: f32, color: rl.Color) void {
