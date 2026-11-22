@@ -641,44 +641,17 @@ pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
     });
 }
 
-/// Query over every mother star: term 0 = `Position`, term 1 = optional
-/// `PrevPosition`, term 2 = `Ball`. Caller owns it (`ecs.query_fini`).
-pub fn motherQuery(world: *ecs.world_t) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.id(Ball) },
-            .{ .id = ecs.id(Mother) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
-    });
-}
-
-/// Query over every star (what glows): term 0 = `Position`, term 1 =
-/// optional `PrevPosition`, term 2 = `Ball`, as `ballQuery`.
-/// Caller owns it (`ecs.query_fini`).
-pub fn starQuery(world: *ecs.world_t) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.id(Ball) },
-            .{ .id = ecs.id(Star) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
-    });
-}
-
-/// Query over every drawable entity: term 0 = `Position`, term 1 = optional
-/// `PrevPosition` (null field for static entities), term 2 = `Ball`.
-/// Caller owns it (`ecs.query_fini`).
-pub fn ballQuery(world: *ecs.world_t) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.id(Ball) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
-    });
+/// Query over every drawable entity, or only those with `Tag` (`Star`,
+/// `Mother`): term 0 = `Position`, term 1 = optional `PrevPosition` (null
+/// field for static entities), term 2 = `Ball`. Caller owns it
+/// (`ecs.query_fini`).
+pub fn ballQuery(world: *ecs.world_t, comptime Tag: ?type) !*ecs.query_t {
+    var desc: ecs.query_desc_t = .{};
+    desc.terms[0] = .{ .id = ecs.id(Position) };
+    desc.terms[1] = .{ .id = ecs.id(PrevPosition), .oper = .Optional };
+    desc.terms[2] = .{ .id = ecs.id(Ball) };
+    if (Tag) |T| desc.terms[3] = .{ .id = ecs.id(T) };
+    return ecs.query_init(world, &desc);
 }
 
 // ---------------------------------------------------------------- tests
@@ -992,7 +965,7 @@ test "ballQuery yields every star and planet, all moving" {
     const c = spawnCluster(world, .{ 0, 0, 0 });
     _ = spawnPlanets(world, c.mother);
 
-    const q = try ballQuery(world);
+    const q = try ballQuery(world, null);
     defer ecs.query_fini(q);
     var n: usize = 0;
     var with_prev: usize = 0;
@@ -1047,7 +1020,7 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     register(world);
     const c = spawnCluster(world, .{ 0, 0, 0 });
     const ps = spawnPlanets(world, c.mother);
-    const mq = try motherQuery(world);
+    const mq = try ballQuery(world, Mother);
     defer ecs.query_fini(mq);
     var mothers: usize = 0;
     var mother_ok = true;
@@ -1060,7 +1033,7 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     try expectEqual(@as(usize, 1), mothers);
 
     // Stars (what glows): the mother and her children, no planets.
-    const sq = try starQuery(world);
+    const sq = try ballQuery(world, Star);
     defer ecs.query_fini(sq);
     var stars: usize = 0;
     var sit = ecs.query_iter(world, sq);

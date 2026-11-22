@@ -38,7 +38,12 @@ const blur_spread = 1.5;
 /// How many times the glow is added: brightness of the aura. Two (approved
 /// look) washes the green children toward mint-white in their cores.
 const glow_layers = 2;
-const blur_fs = if (builtin.os.tag == .emscripten) @embedFile("shaders/blur.100.fs") else @embedFile("shaders/blur.330.fs");
+/// src/shaders/blur.fs with its header: GLSL ES 1.00 for WebGL 1, GLSL 330 on
+/// desktop (raylib's default vertex shader supplies fragTexCoord).
+const blur_fs = (if (builtin.os.tag == .emscripten)
+    "#version 100\nprecision mediump float;\nvarying vec2 fragTexCoord;\n#define TEX texture2D\n#define FRAG gl_FragColor\n"
+else
+    "#version 330\nin vec2 fragTexCoord;\nout vec4 fragOut;\n#define TEX texture\n#define FRAG fragOut\n") ++ @embedFile("shaders/blur.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -116,15 +121,15 @@ pub fn main() !void {
     _ = sim.spawnPlanets(world, sim.spawnCluster(world, .{ 0, 0, 0 }).mother);
     cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius);
 
-    balls = try sim.ballQuery(world);
+    balls = try sim.ballQuery(world, null);
     defer ecs.query_fini(balls);
     cords = try sim.linkQuery(world, sim.Cord);
     defer ecs.query_fini(cords);
     inputs = try sim.linkQuery(world, sim.InputOf);
     defer ecs.query_fini(inputs);
-    mothers = try sim.motherQuery(world);
+    mothers = try sim.ballQuery(world, sim.Mother);
     defer ecs.query_fini(mothers);
-    stars = try sim.starQuery(world);
+    stars = try sim.ballQuery(world, sim.Star);
     defer ecs.query_fini(stars);
 
     for (&glow) |*g| {
@@ -175,7 +180,7 @@ fn frame() callconv(.c) void {
     rl.clearBackground(rl.getColor(background));
     rl.beginMode3D(camera);
     forEachDrawn(cords, drawCord);
-    forEachDrawn(balls, drawBall);
+    forEachDrawn(balls, ballDrawer(1, null));
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
     rl.endMode3D();
@@ -203,16 +208,18 @@ fn glowPass(camera: rl.Camera3D) void {
     rl.beginTextureMode(glow[0]);
     rl.clearBackground(.black);
     rl.beginMode3D(camera);
+    // Every ball in black first, so planets in front of a star hide its glow.
+    forEachDrawn(balls, ballDrawer(1, .black));
     forEachDrawn(cords, drawCord);
-    forEachDrawn(stars, drawGlowBall);
+    forEachDrawn(stars, ballDrawer(glow_grow, null));
     rl.endMode3D();
     rl.endTextureMode();
 
-    const texel = 1.0 / @as(f32, width / glow_downscale);
-    const texel_y = 1.0 / @as(f32, height / glow_downscale);
+    const tap_x = blur_spread / @as(f32, @floatFromInt(glow[0].texture.width));
+    const tap_y = blur_spread / @as(f32, @floatFromInt(glow[0].texture.height));
     for (0..blur_rounds) |_| {
-        blurInto(glow[0], glow[1], .{ texel * blur_spread, 0 });
-        blurInto(glow[1], glow[0], .{ 0, texel_y * blur_spread });
+        blurInto(glow[0], glow[1], .{ tap_x, 0 });
+        blurInto(glow[1], glow[0], .{ 0, tap_y });
     }
 }
 
@@ -229,11 +236,6 @@ fn blurInto(src: rl.RenderTexture2D, dst: rl.RenderTexture2D, tap: [2]f32) void 
 /// A render texture's whole area, upside down: GL stores it bottom-up.
 fn flipped(t: rl.RenderTexture2D) rl.Rectangle {
     return .{ .x = 0, .y = 0, .width = @floatFromInt(t.texture.width), .height = -@as(f32, @floatFromInt(t.texture.height)) };
-}
-
-fn drawGlowBall(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
-    const b = ecs.field(it, sim.Ball, 2).?[i];
-    rl.drawSphere(vec3(at), b.radius * glow_grow, rl.getColor(b.rgba));
 }
 
 /// Mouse or one finger turns the camera, the wheel or two fingers zoom.
@@ -263,9 +265,15 @@ fn forEachDrawn(q: *ecs.query_t, comptime draw: fn (it: *ecs.iter_t, i: usize, a
     }
 }
 
-fn drawBall(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
-    const b = ecs.field(it, sim.Ball, 2).?[i];
-    rl.drawSphere(vec3(at), b.radius, rl.getColor(b.rgba));
+/// A draw callback for balls: each at `scale` × its radius, in its own
+/// colour or in `color`.
+fn ballDrawer(comptime scale: f32, comptime color: ?rl.Color) fn (*ecs.iter_t, usize, sim.Vec3) void {
+    return struct {
+        fn draw(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+            const b = ecs.field(it, sim.Ball, 2).?[i];
+            rl.drawSphere(vec3(at), b.radius * scale, color orelse rl.getColor(b.rgba));
+        }
+    }.draw;
 }
 
 /// A child's glowing cord to her mother.
