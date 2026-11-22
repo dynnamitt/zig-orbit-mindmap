@@ -13,8 +13,8 @@ const sand = 0xC8A878FF; // readout text
 const link_gray = 0x666666FF; // planet-to-mother dots and the mother's ring
 const cord_glow = 0xB8F5C8FF; // pale green: the children's cords
 
-// Links (world units). Cords are thin cylinders, ready to glow once bloom
-// lands; planet links are dashes from the planet to the mother's ring.
+// Links (world units). Cords are thin glowing cylinders; planet links are
+// dashes from the planet to the mother's ring.
 const cord_radius = 0.05;
 const cord_sides = 6;
 const dash_len = 0.3;
@@ -26,14 +26,14 @@ const ring_segments = 48;
 const fovy = 45; // degrees, vertical
 
 // Bloom: stars and cords are also drawn into a smaller glow texture, which is
-// blurred and added on top of the scene. Gray links, rings and planets stay
-// out of it.
+// blurred and added on top of the scene. Planets go into it in black (so they
+// hide the glow behind them); gray links and rings stay out.
 const glow_downscale = 2; // glow texture size = window size / this
 /// Glowing spheres are drawn this much larger than the stars, for a wider aura.
 const glow_grow = 1.4;
 /// Horizontal + vertical blur rounds; each widens the aura.
 const blur_rounds = 2;
-/// Glow texels between blur taps (wider is softer; above ~2 it shows bands).
+/// Glow texels between the blur's taps (wider is softer; above ~2 it bands).
 const blur_spread = 1.5;
 /// How many times the glow is added: brightness of the aura. Two (approved
 /// look) washes the green children toward mint-white in their cores.
@@ -135,6 +135,9 @@ pub fn main() !void {
     for (&glow) |*g| {
         g.* = try rl.loadRenderTexture(width / glow_downscale, height / glow_downscale);
         rl.setTextureFilter(g.texture, .bilinear); // smooth when scaled up
+        // raylib makes render textures repeat; the blur's edge taps would
+        // then pick up glow from the opposite edge.
+        rl.setTextureWrap(g.texture, .clamp);
     }
     defer for (glow) |g| rl.unloadRenderTexture(g);
     blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
