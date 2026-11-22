@@ -379,7 +379,8 @@ fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
     }
 }
 
-/// The rings the planets started on, around the barycenter: faded dots.
+/// The rings the planets are laid out on (and drift from), faded dots around
+/// the current barycenter, which their orbits circle.
 fn drawStartRings() void {
     for (0..sim.planet_rings) |ring| {
         const r = sim.splat(sim.ringRadius(@intCast(ring)));
@@ -394,13 +395,19 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const b = ecs.field(it, sim.Ball, 2).?[i];
     const text = ecs.field(it, sim.Label, 3).?[i].text;
     const center = rl.getWorldToScreen(vec3(at), frame_camera);
+    // Just in front of the eye (zoomed in among the planets) a body projects
+    // far off screen, beyond what @intFromFloat can hold: no label then.
+    const w: f32 = @floatFromInt(screenSize()[0]);
+    const h: f32 = @floatFromInt(screenSize()[1]);
+    if (!(@abs(center.x) < 4 * w and @abs(center.y) < 4 * h)) return; // also skips NaN
     // The sphere's on-screen radius: project a point on its right edge.
     const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
     const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
     const text_w: f32 = @floatFromInt(rl.measureText(text, label_font_size));
-    // Right of the sphere, or left of it where the right would run off screen.
-    const x = if (center.x + offset + text_w > @as(f32, @floatFromInt(screenSize()[0]))) center.x - offset - text_w else center.x + offset;
+    // Right of the sphere, or left of it where the right would run off
+    // screen; never past the left edge either.
+    const x = @max(0, if (center.x + offset + text_w > w) center.x - offset - text_w else center.x + offset);
     const y = center.y - label_font_size / 2;
     rl.drawText(text, @intFromFloat(x), @intFromFloat(y), label_font_size, rl.getColor(label_color));
 }
