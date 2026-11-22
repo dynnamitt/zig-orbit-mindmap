@@ -517,19 +517,26 @@ fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 fn drawThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
     const r = ecs.field(it, sim.Ball, 2).?[i].radius;
-    const back = -t.dir; // the side it pushes from
-    // A thin disc just proud of the surface.
-    const disc_in = at + back * sim.splat(r * 0.96);
-    const disc_out = at + back * sim.splat(r * 1.02);
-    const nozzle = if (t.on) flameColor(t.time) else rl.getColor(nozzle_idle);
-    rl.drawCylinderEx(vec3(disc_in), vec3(disc_out), r * nozzle_size, r * nozzle_size, beam_sides, nozzle);
-    if (t.on) drawBeam(at, back, r, t.time);
+    if (t.on) drawFlame(at, -t.dir, r, t.time) else drawNozzle(at, -t.dir, r, rl.getColor(nozzle_idle));
 }
 
 /// The glow pass's share: only a firing thruster glows.
 fn drawFiringThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
-    if (t.on) drawBeam(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, t.time);
+    if (t.on) drawFlame(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, t.time);
+}
+
+/// A firing thruster: the nozzle in flame colour and its beam.
+fn drawFlame(at: sim.Vec3, back: sim.Vec3, r: f32, time: f32) void {
+    drawNozzle(at, back, r, flameColor(time));
+    drawBeam(at, back, r, time);
+}
+
+/// A thin disc just proud of the surface, on the side `back` points to.
+fn drawNozzle(at: sim.Vec3, back: sim.Vec3, r: f32, color: rl.Color) void {
+    const disc_in = at + back * sim.splat(r * 0.96);
+    const disc_out = at + back * sim.splat(r * 1.02);
+    rl.drawCylinderEx(vec3(disc_in), vec3(disc_out), r * nozzle_size, r * nozzle_size, beam_sides, color);
 }
 
 /// The exhaust: a cone out of the nozzle along `back`, its length and colour

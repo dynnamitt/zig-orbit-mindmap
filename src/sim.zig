@@ -195,7 +195,8 @@ pub const Planet = struct {};
 /// ring's speed `omega` (rad/s), so the slots keep the even spacing.
 pub const Slot = struct { r: f32, phase: f32, omega: f32 };
 /// A planet's thruster: `on` while it steers back to its slot, pushing along
-/// `dir` (unit); `time` counts how long it has been firing.
+/// `dir` (unit; while idle, the way its slot moves); `time` counts how long it
+/// has been firing.
 pub const Thruster = struct { on: bool = false, dir: Vec3 = .{ 0, 1, 0 }, time: f32 = 0 };
 /// A name to show next to a body (planets and child stars).
 pub const Label = struct { text: [:0]const u8 };
@@ -405,12 +406,16 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
     const f = &ecs.field(it, StarField, thrust_field).?[0];
     const dt = it.delta_time;
     for (positions, velocities, slots, thrusters) |p, *v, *slot, *t| {
-        slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
+        // Compare with the slot where it is now, then move the slot on.
+        defer slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
         const target = f.center + ringDir(slot.phase) * splat(slot.r);
-        const target_v = f.drift + ringDir(slot.phase + std.math.pi / 2.0) * splat(slot.omega * slot.r);
+        const ahead = ringDir(slot.phase + std.math.pi / 2.0);
+        const target_v = f.drift + ahead * splat(slot.omega * slot.r);
         const off = length(target - p.v) / slot.r;
         if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
         if (!t.on) {
+            // Idle, the nozzle trails the planet round its ring.
+            t.dir = ahead;
             t.time = 0;
             continue;
         }
@@ -1026,12 +1031,11 @@ test "planets stay near their orbits and planes for two minutes" {
         const b = positionOf(world, ecs.id(Barycenter));
         for (sc.ps, 0..) |e, i| {
             const d = positionOf(world, e) - b;
-            // The stars' pull (and the radial damping) move them, so they drift
-            // (a 2-minute probe: 0.89-1.14
-            // radii, 0.10 radii off the plane; 10 minutes: up to 1.34 and 0.15).
+            // The thrusters hold each planet within about 0.1 radii of its
+            // slot (see the slot test), so of its ring radius and plane.
             const slot_r = planetSlot(i, planet_count).r;
             const r = length(d) / slot_r;
-            try expect(r > 0.85 and r < 1.2);
+            try expect(r > 0.88 and r < 1.12);
             try expect(@abs(rotate(d, planet_tilt_axis, -planet_tilt)[1]) / slot_r < 0.13);
         }
     }
