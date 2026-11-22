@@ -32,7 +32,12 @@ const repel_soft = 0.25;
 /// Children start this far off their rest length (fractions of it), so the
 /// wobble starts uneven. They start level with the mother: a tilted cluster
 /// would slowly turn the planets' orbits about its own axis.
-const child_stretch = [_]f32{ 0.15, -0.1, 0.05 };
+const ChildData = struct { name: [:0]const u8, stretch: f32 };
+const children = [_]ChildData{
+    .{ .name = "native binary", .stretch = 0.15 },
+    .{ .name = "index.wasm", .stretch = -0.1 },
+    .{ .name = "Pages site", .stretch = 0.05 },
+};
 /// Most stars the `cluster` system handles (it works on all of them at once).
 const max_stars = 16;
 
@@ -79,7 +84,6 @@ const planets = [_]PlanetData{
     .{ .name = "ci.yml", .rgba = 0xD9531EFF },
     .{ .name = "zig 0.17", .rgba = 0x5F8FB0FF },
 };
-const child_names = [child_stretch.len][:0]const u8{ "native binary", "index.wasm", "Pages site" };
 /// Planets in the scene.
 pub const planet_count = planets.len;
 /// Rings the scene's planets start on: the default one, plus the bumped one
@@ -620,7 +624,7 @@ pub const TouchSteer = struct {
     }
 };
 
-pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]ecs.entity_t };
+pub const Cluster = struct { mother: ecs.entity_t, children: [children.len]ecs.entity_t };
 
 /// The mother star at `at`, anchored there, and her children spread evenly
 /// around her on cords, each started a little off rest so the cluster wobbles.
@@ -628,20 +632,20 @@ pub const Cluster = struct { mother: ecs.entity_t, children: [child_stretch.len]
 /// `barycenter` system will after each step.
 pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     var c: Cluster = undefined;
-    var f: StarField = .{ .n = 1 + child_stretch.len };
+    var f: StarField = .{ .n = 1 + children.len };
     c.mother = spawnStar(world, at, mother_mass, mother_radius, mother_white);
     ecs.add(world, c.mother, Mother);
     set(world, c.mother, Home, .{ .v = at });
     f.pos[0] = at;
     f.mass[0] = mother_mass;
 
-    for (&c.children, child_stretch, 1..) |*child, stretch, i| {
-        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / child_stretch.len;
-        const r = cord_rest * (1 + stretch);
+    for (&c.children, children, 1..) |*child, data, i| {
+        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / children.len;
+        const r = cord_rest * (1 + data.stretch);
         const p = at + Vec3{ r * @cos(angle), 0, -r * @sin(angle) };
         child.* = spawnStar(world, p, child_mass, child_radius, child_green);
         setPair(world, child.*, Cord, c.mother, .{ .rest = cord_rest });
-        set(world, child.*, Label, .{ .text = child_names[i - 1] });
+        set(world, child.*, Label, .{ .text = data.name });
         f.pos[i] = p;
         f.mass[i] = child_mass;
     }
@@ -911,7 +915,7 @@ test "cluster: stars stay together and the barycenter drifts only a little" {
         }
         // The singleton is the mass-weighted mean, and remembers the step before.
         const b = positionOf(world, ecs.id(Barycenter));
-        try expect(distance(b, sum / splat(mother_mass + child_mass * @as(f32, child_stretch.len))) < 1e-4);
+        try expect(distance(b, sum / splat(mother_mass + child_mass * @as(f32, children.len))) < 1e-4);
         try expectEqual(before, ecs.get(world, ecs.id(Barycenter), PrevPosition).?.v);
         drift = @max(drift, distance(b, home));
     }
@@ -1109,7 +1113,7 @@ test "ballQuery yields every star and planet, all moving" {
         n += it.count();
         if (ecs.field(&it, PrevPosition, 1) != null) with_prev += it.count();
     }
-    const total = 1 + child_stretch.len + planet_count;
+    const total = 1 + children.len + planet_count;
     try expectEqual(total, n);
     try expectEqual(total, with_prev);
 }
@@ -1260,7 +1264,7 @@ test "labels: every planet and child star, never the mother" {
     register(world);
     const sc = spawnScene(world, planet_count);
     try expect(!ecs.has_id(world, sc.c.mother, ecs.id(Label)));
-    for (sc.c.children, child_names) |e, name| try std.testing.expectEqualStrings(name, ecs.get(world, e, Label).?.text);
+    for (sc.c.children, children) |e, data| try std.testing.expectEqualStrings(data.name, ecs.get(world, e, Label).?.text);
 
     // ballQuery with Label finds exactly those, with Ball at term 2 and
     // Label at term 3 for the renderer.
@@ -1269,7 +1273,7 @@ test "labels: every planet and child star, never the mother" {
     var n: usize = 0;
     var it = ecs.query_iter(world, q);
     while (ecs.query_next(&it)) n += it.count();
-    try expectEqual(planet_count + child_names.len, n);
+    try expectEqual(planet_count + children.len, n);
 }
 
 test "ringDir/ringRadius trace the rings planets start on" {

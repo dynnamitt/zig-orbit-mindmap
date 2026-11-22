@@ -381,15 +381,9 @@ fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
 
 /// The rings the planets started on, around the barycenter: faded dots.
 fn drawStartRings() void {
-    const color = rl.getColor(start_ring_gray);
     for (0..sim.planet_rings) |ring| {
-        const r = sim.ringRadius(@intCast(ring));
-        var k: usize = 0;
-        while (k < start_ring_segments) : (k += 2) {
-            const a0 = std.math.tau * @as(f32, @floatFromInt(k)) / start_ring_segments;
-            const a1 = std.math.tau * @as(f32, @floatFromInt(k + 1)) / start_ring_segments;
-            rl.drawLine3D(vec3(cam.target + sim.ringDir(a0) * sim.splat(r)), vec3(cam.target + sim.ringDir(a1) * sim.splat(r)), color);
-        }
+        const r = sim.splat(sim.ringRadius(@intCast(ring)));
+        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, rl.getColor(start_ring_gray));
     }
 }
 
@@ -420,13 +414,19 @@ fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const right = sim.cross(view, .{ 0, 1, 0 });
     const u = sim.normalize(right) * sim.splat(r);
     const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
-    const color = rl.getColor(link_gray);
-    var prev = at + u;
-    for (1..ring_segments + 1) |k| {
-        const t = std.math.tau * @as(f32, @floatFromInt(k)) / ring_segments;
-        const next = at + u * sim.splat(@cos(t)) + v * sim.splat(@sin(t));
-        rl.drawLine3D(vec3(prev), vec3(next), color);
-        prev = next;
+    drawCircle(at, u, v, ring_segments, 1, rl.getColor(link_gray));
+}
+
+/// A circle around `center` spanned by the radius vectors `u` and `v`, in
+/// `segments` straight pieces: every one (`step` 1) or every other (2, dotted).
+fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, color: rl.Color) void {
+    var k: usize = 0;
+    while (k < segments) : (k += step) {
+        const a0 = std.math.tau * @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(segments));
+        const a1 = std.math.tau * @as(f32, @floatFromInt(k + 1)) / @as(f32, @floatFromInt(segments));
+        const p0 = center + u * sim.splat(@cos(a0)) + v * sim.splat(@sin(a0));
+        const p1 = center + u * sim.splat(@cos(a1)) + v * sim.splat(@sin(a1));
+        rl.drawLine3D(vec3(p0), vec3(p1), color);
     }
 }
 
