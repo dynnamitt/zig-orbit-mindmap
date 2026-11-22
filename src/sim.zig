@@ -19,6 +19,12 @@ const child_mass = 0.5;
 /// Cord rest length, mother center to child center.
 const cord_rest = 2.2;
 const cord_k = 1.2;
+/// Cord thickness at rest length, and how fast it changes with stretch:
+/// radius ∝ (rest / len)^cord_bulge, within [min, max] × the rest radius.
+const cord_radius = 0.125;
+const cord_bulge = 3.0;
+const cord_bulge_min = 0.4;
+const cord_bulge_max = 3.0;
 const home_k = 0.8;
 /// Pair push: `repel / (r² + repel_soft)`, soft so close passes stay gentle.
 const repel = 0.4;
@@ -121,7 +127,18 @@ pub const Star = struct { mass: f32 };
 /// Relationship `(Cord, mother)`: a spring of `rest` length between this star
 /// and `mother` (also a `Star`). It pulls when stretched, pushes when squeezed.
 /// At most one per star (safe builds check both rules).
-pub const Cord = struct { rest: f32 };
+pub const Cord = struct {
+    rest: f32,
+
+    /// Radius to draw the cord at its current `len`: like an elastic band it
+    /// thickens fast when squeezed and thins when stretched, as
+    /// (rest / len)^cord_bulge, clamped.
+    pub fn radius(self: Cord, len: f32) f32 {
+        if (!(len > 0)) return cord_radius * cord_bulge_max;
+        const k = std.math.pow(f32, self.rest / len, cord_bulge);
+        return cord_radius * std.math.clamp(k, cord_bulge_min, cord_bulge_max);
+    }
+};
 /// A weak spring holds the star near `v` (the mother's anchor).
 pub const Home = struct { v: Vec3 };
 /// Tag on the entity `ecs.id(Barycenter)` (a singleton): its `Position` is the
@@ -1084,4 +1101,13 @@ test "TouchSteer: pinch only within the same pair of fingers" {
     // Down to one finger: it waits a frame before dragging.
     try expectEqual(Gesture.none, t.update(&.{a}, false, .{ 0, 0 }));
     try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{a}, false, .{ 0, 0 }));
+}
+
+test "Cord.radius: thicker when squeezed, thinner when stretched, clamped" {
+    const c: Cord = .{ .rest = 2 };
+    try expectApproxEqAbs(@as(f32, cord_radius), c.radius(2), 1e-6);
+    try expectEqual(@as(f32, cord_radius * cord_bulge_max), c.radius(1)); // (2/1)^3 = 8, clamped
+    try expectApproxEqAbs(@as(f32, cord_radius / 1.728), c.radius(2.4), 1e-5); // (2/2.4)^3
+    try expectEqual(@as(f32, cord_radius * cord_bulge_min), c.radius(100));
+    try expectEqual(@as(f32, cord_radius * cord_bulge_max), c.radius(0));
 }

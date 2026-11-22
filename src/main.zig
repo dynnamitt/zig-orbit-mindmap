@@ -13,10 +13,9 @@ const sand = 0xC8A878FF; // readout text
 const link_gray = 0x666666FF; // planet-to-mother dots and the mother's ring
 const cord_glow = 0xB8F5C8FF; // pale green: the children's cords
 
-// Links (world units). Cords are thin glowing cylinders; planet links are
-// dashes from the planet to the mother's ring.
-const cord_radius = 0.05;
-const cord_sides = 6;
+// Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
+// planet links are dashes from the planet to the mother's ring.
+const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
 /// The mother's ring: radius as a multiple of hers, leaving room for her glow.
@@ -280,9 +279,10 @@ fn ballDrawer(comptime scale: f32, comptime color: ?rl.Color) fn (*ecs.iter_t, u
 }
 
 /// A child's glowing cord to her mother.
-fn drawCord(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
+fn drawCord(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const to = drawnOf(sim.pairTarget(it, 2));
-    rl.drawCylinderEx(vec3(at), vec3(to), cord_radius, cord_radius, cord_sides, rl.getColor(cord_glow));
+    const r = ecs.field(it, sim.Cord, 2).?[i].radius(sim.length(to - at));
+    rl.drawCylinderEx(vec3(at), vec3(to), r, r, cord_sides, rl.getColor(cord_glow));
 }
 
 /// Dashes from a planet to its mother's ring (its sphere hides the start).
