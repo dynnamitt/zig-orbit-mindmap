@@ -594,6 +594,12 @@ pub const OrbitCam = struct {
         self.pitch = std.math.clamp(self.pitch + dy * drag_speed, -max_pitch, max_pitch);
     }
 
+    /// How far zoomed in from the default framing of a scene `radius` on a
+    /// screen `aspect` wide: 1 there, 2 at half the distance.
+    pub fn zoomFactor(self: OrbitCam, radius: f32, aspect: f32) f32 {
+        return fitDistance(radius, aspect) / self.distance;
+    }
+
     /// `notches` of mouse wheel; positive zooms in.
     pub fn zoom(self: *OrbitCam, notches: f32) void {
         self.distance = std.math.clamp(self.distance * @exp(-notches * zoom_speed), self.min_distance, self.max_distance);
@@ -928,6 +934,14 @@ test "OrbitCam: eye sits `distance` from the target, above it for positive pitch
     var level = OrbitCam.framing(.{ 0, 0, 0 }, 1, 800.0 / 450.0);
     level.pitch = 0;
     try expect(distance(level.eye(), .{ 0, 0, level.distance }) < 1e-4);
+}
+
+test "OrbitCam: zoomFactor is 1 at the default framing and grows zooming in" {
+    const a = 800.0 / 450.0;
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5, a);
+    try expectApproxEqAbs(@as(f32, 1), cam.zoomFactor(5, a), 1e-6);
+    cam.distance /= 2;
+    try expectApproxEqAbs(@as(f32, 2), cam.zoomFactor(5, a), 1e-5);
 }
 
 test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
