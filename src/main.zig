@@ -109,15 +109,14 @@ var touch: sim.TouchSteer = .{};
 var alpha: f32 = 0;
 var eye: sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
-/// Current window size (see `long_side`).
-var width: i32 = long_side;
-var height: i32 = short_side;
+/// Window orientation (see `long_side`).
+var portrait = false;
 var frames: u32 = 0;
 var stats: sim.FrameStats = .{};
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    setOrientation(wantPortrait(init.args));
-    rl.initWindow(width, height, "zig-orbit-mindmap");
+    portrait = if (builtin.os.tag == .emscripten) webPortrait() else try hasArg(init.args, "--portrait");
+    rl.initWindow(screenSize()[0], screenSize()[1], "zig-orbit-mindmap");
     defer rl.closeWindow();
 
     world = ecs.init();
@@ -125,7 +124,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
     _ = sim.spawnPlanets(world, sim.spawnCluster(world, .{ 0, 0, 0 }).mother, sim.planet_count);
-    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius, @floatFromInt(width), @floatFromInt(height));
+    cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius, aspect());
 
     balls = try sim.ballQuery(world, null);
     defer ecs.query_fini(balls);
@@ -157,19 +156,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
+    // web/shell.html keeps Module.portrait in step with the viewport.
     if (builtin.os.tag == .emscripten) {
         frames +%= 1;
-        if (frames % orient_check_frames == 0) {
-            const portrait = webPortrait();
-            if (portrait != (height > width)) {
-                const from = [2]f32{ @floatFromInt(width), @floatFromInt(height) };
-                setOrientation(portrait);
-                cam.reframe(from, .{ @floatFromInt(width), @floatFromInt(height) });
-                rl.setWindowSize(width, height);
-                unloadGlow();
-                loadGlow() catch @panic("glow textures");
-            }
-        }
+        if (frames % orient_check_frames == 0 and webPortrait() != portrait) flip();
     }
     // Fixed steps, never raylib's raw dt: a long frame would otherwise
     // fling planets out of orbit, and dt=0 (first frame) would make
@@ -187,7 +177,7 @@ fn frame() callconv(.c) void {
         .position = vec3(eye),
         .target = vec3(cam.target),
         .up = .{ .x = 0, .y = 1, .z = 0 },
-        .fovy = sim.OrbitCam.fovyFor(@floatFromInt(width), @floatFromInt(height)),
+        .fovy = sim.OrbitCam.fovyFor(aspect()),
         .projection = .perspective,
     };
     glowPass(camera);
@@ -204,7 +194,7 @@ fn frame() callconv(.c) void {
 
     // The blurred glow, added on top.
     rl.beginBlendMode(.additive);
-    for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height) }, .{ .x = 0, .y = 0 }, 0, .white);
+    for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = @floatFromInt(screenSize()[0]), .height = @floatFromInt(screenSize()[1]) }, .{ .x = 0, .y = 0 }, 0, .white);
     rl.endBlendMode();
 
     // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
@@ -220,12 +210,10 @@ fn frame() callconv(.c) void {
     drawStat(std.fmt.bufPrintSentinel(&buf, "cpu {d:.2}/{d:.2} ms", .{ stats.mean_ms, stats.max_ms }, 0) catch "cpu ?", 1);
 }
 
-/// Natively `--portrait` among the args; on web, a viewport taller than wide.
-fn wantPortrait(args: std.process.Args) bool {
-    if (builtin.os.tag == .emscripten) return webPortrait();
-    if (builtin.os.tag == .windows) return false; // arg iteration needs an allocator there
-    var it = args.iterate();
-    while (it.next()) |arg| if (std.mem.eql(u8, arg, "--portrait")) return true;
+fn hasArg(args: std.process.Args, want: []const u8) !bool {
+    var it = try args.iterateAllocator(std.heap.page_allocator); // Windows needs one
+    defer it.deinit();
+    while (it.next()) |arg| if (std.mem.eql(u8, arg, want)) return true;
     return false;
 }
 
@@ -234,15 +222,30 @@ fn webPortrait() bool {
     return std.os.emscripten.emscripten_run_script_int("Module.portrait|0") != 0;
 }
 
-fn setOrientation(portrait: bool) void {
-    width = if (portrait) short_side else long_side;
-    height = if (portrait) long_side else short_side;
+fn screenSize() [2]i32 {
+    return if (portrait) .{ short_side, long_side } else .{ long_side, short_side };
+}
+
+/// Width / height of the window.
+fn aspect() f32 {
+    const s = screenSize();
+    return @as(f32, @floatFromInt(s[0])) / @as(f32, @floatFromInt(s[1]));
+}
+
+/// Switch orientation: the window, the glow textures and the camera's zoom.
+fn flip() void {
+    const from = aspect();
+    portrait = !portrait;
+    cam.reframe(from, aspect());
+    rl.setWindowSize(screenSize()[0], screenSize()[1]);
+    unloadGlow();
+    loadGlow() catch @panic("glow textures");
 }
 
 /// Glow textures at the current window size.
 fn loadGlow() !void {
     for (&glow) |*g| {
-        g.* = try rl.loadRenderTexture(@divTrunc(width, glow_downscale), @divTrunc(height, glow_downscale));
+        g.* = try rl.loadRenderTexture(@divTrunc(screenSize()[0], glow_downscale), @divTrunc(screenSize()[1], glow_downscale));
         rl.setTextureFilter(g.texture, .bilinear); // smooth when scaled up
         // raylib makes render textures repeat; the blur's edge taps would
         // then pick up glow from the opposite edge.
@@ -393,6 +396,6 @@ extern fn rlDrawRenderBatchActive() void;
 
 /// One right-aligned readout line; `line` 0 is the top.
 fn drawStat(text: [:0]const u8, line: i32) void {
-    const x = width - stats_margin - rl.measureText(text, stats_font_size);
+    const x = screenSize()[0] - stats_margin - rl.measureText(text, stats_font_size);
     rl.drawText(text, x, stats_margin + line * (stats_font_size + stats_line_gap), stats_font_size, rl.getColor(sand));
 }
