@@ -479,7 +479,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
     const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
-    const zoom = @max(1, cam.zoomFactor(sim.system_radius, w / h));
+    const zoom = @max(1, cam.zoomFactor());
     const size: i32 = @intFromFloat(@round(label_font_size * std.math.pow(f32, zoom, label_zoom_follow)));
     const text_w: f32 = @floatFromInt(rl.measureText(text, size));
     // Right of the sphere, or left of it where the right would run off
