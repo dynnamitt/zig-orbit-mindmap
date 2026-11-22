@@ -80,6 +80,9 @@ const label_gap = 4; // pixels from the sphere's edge
 const glow_downscale = 2; // glow texture size = window size / this
 /// Glowing spheres are drawn this much larger than the stars, for a wider aura.
 const glow_grow = 1.4;
+/// A shrunk star (dancing through the centre) glows at scale^this of its
+/// brightness, on top of its smaller size.
+const glow_scale_power = 2;
 /// Black occluder spheres in the glow pass, relative to the ball.
 const occluder_grow = 1.04;
 /// Horizontal + vertical blur rounds; each widens the aura.
@@ -129,7 +132,7 @@ const ui_font_size = 20;
 const ui_border = 2;
 const ui_disabled = 0x5A5F5AFF; // a button with nothing to do
 /// Labels hide on stars shrunk below this (parked outputs, mostly).
-const label_hide_scale = 0.3;
+const label_hide_scale = 0.1;
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -434,7 +437,7 @@ fn glowPass(camera: rl.Camera3D) void {
     // than drawSphere's: no rim of glow over a planet's edge.
     forEachDrawn(balls, ballDrawer(occluder_grow, .black));
     forEachDrawn(cords, drawCord);
-    forEachDrawn(stars, ballDrawer(glow_grow, null));
+    forEachDrawn(stars, drawStarGlow);
     forEachDrawn(thrusters, drawFiringThruster);
     rl.endMode3D();
     rl.endTextureMode();
@@ -503,6 +506,14 @@ fn ballDrawer(comptime scale: f32, comptime color: ?rl.Color) fn (*ecs.iter_t, u
             rl.drawSphere(vec3(at), b.size() * scale, color orelse rl.getColor(b.rgba));
         }
     }.draw;
+}
+
+/// A star in the glow pass: larger than it is drawn, and dimmer as it shrinks.
+fn drawStarGlow(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    if (b.scale <= 0) return; // parked
+    const dim = std.math.pow(f32, b.scale, glow_scale_power) - 1; // rl.colorBrightness: -1 black, 0 as is
+    rl.drawSphere(vec3(at), b.size() * glow_grow, rl.colorBrightness(rl.getColor(b.rgba), dim));
 }
 
 /// Every ball but the planets (lit by `drawPlanet`): stars and anything else.
