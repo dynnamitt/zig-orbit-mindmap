@@ -43,12 +43,14 @@ const beam_sides = 10;
 // Labels: screen-space text beside each named body, drawn after bloom.
 const label_color = 0xE0D8C8FF; // pale sand
 const label_font_size = 16; // at the default zoom and further out
-/// Outputs (labelled stars): larger, in their star's own green. 20 is 2x
+/// Outputs (bodies with a `(Cord, mother)` pair): larger, in their star's own green. 20 is 2x
 /// raylib's 10 px default font, so it stays crisp.
 const output_font_size = 20;
 /// Their dark outline (the background colour, part see-through), so they read
-/// over the glow: 1 px at `output_font_size`, thicker as they grow. Where the
-/// 8 offset copies overlap, the alpha stacks a little darker.
+/// over the glow: 1 px at `output_font_size`, thicker as they grow.
+/// shortcut: most outline pixels sit under 3-5 of the 8 offset copies, so the
+/// alpha stacks to nearly opaque; draw it into a render texture once for a
+/// true see-through outline.
 const outline_color = (background & 0xFFFFFF00) | 0xA0;
 const outline_offsets = [_][2]i32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
@@ -487,7 +489,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
     const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
-    const output = ecs.has_id(it.world, it.entities()[i], ecs.id(sim.Star));
+    const output = ecs.has_id(it.world, it.entities()[i], ecs.pair(ecs.id(sim.Cord), ecs.Wildcard));
     const base: f32 = if (output) output_font_size else label_font_size;
     const zoom = @max(1, cam.zoomFactor());
     const size: i32 = @intFromFloat(@round(base * std.math.pow(f32, zoom, label_zoom_follow)));
