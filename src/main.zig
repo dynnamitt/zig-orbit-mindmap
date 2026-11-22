@@ -35,8 +35,9 @@ const glow_grow = 1.4;
 const blur_rounds = 2;
 /// Glow texels between blur taps (wider is softer; above ~2 it shows bands).
 const blur_spread = 1.5;
-/// How many times the glow is added: brightness of the aura.
-const glow_layers = 1;
+/// How many times the glow is added: brightness of the aura. Two (approved
+/// look) washes the green children toward mint-white in their cores.
+const glow_layers = 2;
 const blur_fs = if (builtin.os.tag == .emscripten) @embedFile("shaders/blur.100.fs") else @embedFile("shaders/blur.330.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
