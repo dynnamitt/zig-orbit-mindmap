@@ -4,8 +4,6 @@
 [![WebGL](https://img.shields.io/badge/WebGL-live_demo-990000?logo=webgl&logoColor=white)](https://dynnamitt.github.io/zig-orbit-mindmap/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-emscripten-654FF0?logo=webassembly&logoColor=white)](https://emscripten.org/)
 
-![rayzigflecs](tech-trio.svg)
-
 A 3D star system as an IPO (input → process → output) mind map, in Zig 0.17 with
 [raylib-zig](https://github.com/raylib-zig/raylib-zig) for window + rendering and
 [zflecs](https://github.com/zig-gamedev/zflecs) for ECS. Both come in as Zig packages pinned in `build.zig.zon`.
