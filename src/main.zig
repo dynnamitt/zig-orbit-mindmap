@@ -46,6 +46,9 @@ const label_font_size = 16; // at the default zoom and further out
 /// Outputs (labelled stars): larger, in their star's own green. 20 is 2x
 /// raylib's 10 px default font, so it stays crisp.
 const output_font_size = 20;
+/// Their dark outline (the background colour), so they read over the glow:
+/// 1 px at `output_font_size`, thicker as they grow.
+const outline_offsets = [_][2]i32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
 const label_zoom_follow = 0.8;
 const label_gap = 4; // pixels from the sphere's edge
@@ -491,7 +494,13 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     // screen; never past the left edge either.
     const x = @max(0, if (center.x + offset + text_w > w) center.x - offset - text_w else center.x + offset);
     const y = center.y - @as(f32, @floatFromInt(size)) / 2;
-    rl.drawText(text, @intFromFloat(x), @intFromFloat(y), size, rl.getColor(if (output) b.rgba else label_color));
+    const xi: i32 = @intFromFloat(x);
+    const yi: i32 = @intFromFloat(y);
+    if (output) {
+        const t = @max(1, @divTrunc(size, output_font_size));
+        for (outline_offsets) |d| rl.drawText(text, xi + d[0] * t, yi + d[1] * t, size, rl.getColor(background));
+    }
+    rl.drawText(text, xi, yi, size, rl.getColor(if (output) b.rgba else label_color));
 }
 
 /// Hands this frame's stars (drawn positions, colour × share of the mass) to
