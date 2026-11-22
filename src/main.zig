@@ -14,19 +14,30 @@ const min_side = 64;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const sand = 0xC8A878FF; // readout text
-const link_gray = 0x666666FF; // planet-to-ring dashes and the mother's ring
-const cord_glow = 0xB8F5C8FF; // pale green: the children's cords
+const link_gray = 0x666666FF; // the mother's ring
+const cord_glow = 0xB4F7CFFF; // pale phosphor green: the children's cords
+/// Theme (phosphor CRT, beside the children's green in sim.zig): the planets'
+/// orbit rings, inner amber and outer cyan. A planet's link takes its ring's.
+const ring_colors = [2]u32{ 0xFFB000FF, 0x3FC8D0FF };
 
 // Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
-// planet links are dashes from the planet to the mother's ring.
+// planet links are faded tube dashes from the planet to the mother's ring:
+// thinner and a little brighter while the planet is off its ring (not touching).
 const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
+const tube_sides = 4; // faded rings' and links' tubes: too thin to look square
+const link_width = 0.05; // tube radius
+const link_alpha = 0.35;
+const link_off_thin = 0.5; // × link_width
+const link_off_alpha = 0.5;
+const link_off_brighten = 0.2; // rl.colorBrightness
 /// The mother's ring: radius as a multiple of hers, leaving room for her glow.
 const ring_scale = 2.2;
 const ring_segments = 48;
-/// The planets' starting rings: thin, faded dots (every other segment).
-const start_ring_gray = 0x66666670;
+/// The planets' starting rings: faded tube dashes (every other segment).
+const start_ring_width = 0.06; // tube radius
+const start_ring_alpha = 0.3;
 const start_ring_segments = 160;
 // Thrusters (sim.Thruster): a nozzle disc set into the planet on the side it
 // pushes from, and while firing a tapered, pulsing exhaust beam out of it,
@@ -98,6 +109,12 @@ const planet_fs = (if (web)
 else
     "#version 330\nin vec3 fragPos;\nin vec3 fragNormal;\nout vec4 fragOut;\n#define FRAG fragOut\n") ++
     std.fmt.comptimePrint("#define MAX_STARS {d}\n", .{sim.max_stars}) ++ @embedFile("shaders/planet.fs");
+// Starfield (src/shaders/sky.fs): drawn first, added onto the background.
+// Its hash needs highp: WebGL without it in fragment shaders gets no stars.
+const sky_fs = (if (web)
+    "#version 100\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#define SKY_OFF\n#endif\n#define FRAG gl_FragColor\n"
+else
+    "#version 330\nout vec4 fragOut;\n#define FRAG fragOut\n") ++ @embedFile("shaders/sky.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
@@ -173,11 +190,17 @@ var star_n: i32 = 0;
 var star_pos: [sim.max_stars][3]f32 = undefined;
 var star_light: [sim.max_stars][3]f32 = undefined;
 var star_mass_total: f32 = 0;
+var sky: rl.Shader = undefined;
+/// sky.fs uniform locations, by name.
+var sky_loc: struct { resolution: i32, fwd: i32, right: i32, up: i32, time: i32 } = undefined;
 var cam: sim.OrbitCam = undefined;
 var touch: sim.TouchSteer = .{};
 /// This frame's interpolation weight and camera position, for the draw callbacks.
 var alpha: f32 = 0;
 var eye: sim.Vec3 = undefined;
+/// This frame's camera axes, unit: forward, right, up. The pitch clamp keeps
+/// forward off vertical.
+var view: [3]sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
 /// The window size the camera is framed for (see `resize`).
 var view_size: [2]i32 = undefined;
@@ -201,9 +224,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     balls = try sim.ballQuery(world, null);
     defer ecs.query_fini(balls);
-    cords = try sim.linkQuery(world, sim.Cord);
+    cords = try sim.linkQuery(world, sim.Cord, &.{});
     defer ecs.query_fini(cords);
-    inputs = try sim.linkQuery(world, sim.InputOf);
+    inputs = try sim.linkQuery(world, sim.InputOf, &.{ sim.Slot, sim.Ball });
     defer ecs.query_fini(inputs);
     mothers = try sim.ballQuery(world, sim.Mother);
     defer ecs.query_fini(mothers);
@@ -237,6 +260,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (planet_material.shader.id == rlGetShaderIdDefault() or loc_star_count < 0 or loc_star_pos < 0 or loc_star_light < 0)
         return error.PlanetShader;
     rl.setShaderValue(planet_material.shader, rl.getShaderLocation(planet_material.shader, "ambient"), &planet_ambient, .float);
+    sky = try rl.loadShaderFromMemory(null, sky_fs);
+    defer rl.unloadShader(sky);
+    // Likewise: raylib's fallback shader would paint the whole screen white.
+    if (sky.id == rlGetShaderIdDefault()) return error.SkyShader;
+    // Not checked: with SKY_OFF they are compiled out, and -1 sets nothing.
+    inline for (@typeInfo(@TypeOf(sky_loc)).@"struct".field_names) |name| @field(sky_loc, name) = rl.getShaderLocation(sky, name);
 
     if (web) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -263,6 +292,9 @@ fn frame() callconv(.c) void {
     // jitters against them.
     cam.target = drawnOf(ecs.id(sim.Barycenter));
     eye = cam.eye();
+    const fwd = sim.normalize(cam.target - eye);
+    const right = sim.normalize(sim.cross(fwd, .{ 0, 1, 0 }));
+    view = .{ fwd, right, sim.cross(right, fwd) };
 
     frame_camera = .{
         .position = vec3(eye),
@@ -276,15 +308,22 @@ fn frame() callconv(.c) void {
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
+    drawSky();
     rl.beginMode3D(frame_camera);
-    drawStartRings();
     forEachDrawn(cords, drawCord);
     forEachDrawn(balls, drawUnlitBall);
     lightPlanets();
     forEachDrawn(planets, drawPlanet);
     forEachDrawn(thrusters, drawThruster);
+    // See-through last, so they don't hide what is behind them, and
+    // without writing depth, so they don't hide each other either.
+    rlDrawRenderBatchActive(); // the depth mask applies when a batch is drawn
+    rlDisableDepthMask();
+    drawStartRings();
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
     rl.endMode3D();
 
     // The blurred glow, added on top.
@@ -454,33 +493,62 @@ fn drawCord(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     rl.drawCylinderEx(vec3(at), vec3(to), r, r, cord_sides, rl.getColor(cord_glow));
 }
 
-/// Dashes from a planet to its mother's ring (its sphere hides the start).
-fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
+/// Dashes from a planet to its mother's ring (its sphere hides the start), in
+/// its orbit ring's colour: thinner and brighter while it is off that ring.
+fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const mother = sim.pairTarget(it, 2);
     const d = drawnOf(mother) - at;
     const len = sim.length(d) - ringRadius(mother);
     if (len <= 0) return;
+    const ring = ecs.field(it, sim.Slot, 3).?[i].ring;
+    const off = sim.ringGap(at, cam.target, ring) > ecs.field(it, sim.Ball, 4).?[i].radius;
+    const base = rl.getColor(ring_colors[ring]);
+    const width: f32, const color = if (off)
+        .{ link_width * link_off_thin, rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) }
+    else
+        .{ link_width, rl.colorAlpha(base, link_alpha) };
     const dir = sim.normalize(d);
-    const color = rl.getColor(link_gray);
     var t: f32 = 0;
     while (t < len) : (t += dash_len + dash_gap) {
-        rl.drawLine3D(vec3(at + dir * sim.splat(t)), vec3(at + dir * sim.splat(@min(t + dash_len, len))), color);
+        drawSegment(at + dir * sim.splat(t), at + dir * sim.splat(@min(t + dash_len, len)), width, color);
     }
 }
 
-/// The rings the planets are laid out on (and drift from), faded dots around
-/// the current barycenter, which their orbits circle.
+/// The rings the planets are laid out on (and drift from), faded dashes in
+/// their theme colours around the current barycenter, which their orbits circle.
 fn drawStartRings() void {
     for (0..sim.planet_rings) |ring| {
         const r = sim.splat(sim.ringRadius(@intCast(ring)));
-        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, rl.getColor(start_ring_gray));
+        const color = rl.colorAlpha(rl.getColor(ring_colors[ring]), start_ring_alpha);
+        drawCircle(cam.target, sim.ringDir(0) * r, sim.ringDir(std.math.pi / 2.0) * r, start_ring_segments, 2, start_ring_width, color);
     }
+}
+
+/// The starfield, added onto the cleared background. It turns with the
+/// camera: sky.fs gets the camera's axes, scaled to the field of view.
+fn drawSky() void {
+    const tan_h = @tan(std.math.degreesToRadians(frame_camera.fovy / 2));
+    const axes = [3][3]f32{ view[0], view[1] * sim.splat(tan_h * aspect()), view[2] * sim.splat(tan_h) };
+    // gl_FragCoord counts framebuffer pixels (more than screen units on HiDPI);
+    // the rectangle below is in screen units.
+    const res = [2]f32{ @floatFromInt(rl.getRenderWidth()), @floatFromInt(rl.getRenderHeight()) };
+    const size = screenSize();
+    const time: f32 = @floatCast(rl.getTime());
+    rl.setShaderValue(sky, sky_loc.resolution, &res, .vec2);
+    rl.setShaderValue(sky, sky_loc.fwd, &axes[0], .vec3);
+    rl.setShaderValue(sky, sky_loc.right, &axes[1], .vec3);
+    rl.setShaderValue(sky, sky_loc.up, &axes[2], .vec3);
+    rl.setShaderValue(sky, sky_loc.time, &time, .float);
+    rl.beginShaderMode(sky);
+    rl.beginBlendMode(.additive);
+    rl.drawRectangle(0, 0, size[0], size[1], .white);
+    rl.endBlendMode();
+    rl.endShaderMode();
 }
 
 /// A body's name on screen beside its sphere; none behind the camera.
 fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
-    const forward = cam.target - eye;
-    if (sim.dot(at - eye, forward) <= 0) return;
+    if (sim.dot(at - eye, view[0]) <= 0) return;
     const b = ecs.field(it, sim.Ball, 2).?[i];
     const text = ecs.field(it, sim.Label, 3).?[i].text;
     const center = rl.getWorldToScreen(vec3(at), frame_camera);
@@ -490,8 +558,7 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const h: f32 = @floatFromInt(screenSize()[1]);
     if (!(@abs(center.x) < 4 * w and @abs(center.y) < 4 * h)) return; // also skips NaN
     // The sphere's on-screen radius: project a point on its right edge.
-    const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
-    const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
+    const edge = rl.getWorldToScreen(vec3(at + view[1] * sim.splat(b.radius)), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
     const output = ecs.has_id(it.world, it.entities()[i], ecs.pair(ecs.id(sim.Cord), ecs.Wildcard));
     const base: f32 = if (output) output_font_size else label_font_size;
@@ -591,26 +658,28 @@ fn drawPlanet(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 /// A gray circle around a mother that always faces the camera.
 fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const r = ecs.field(it, sim.Ball, 2).?[i].radius * ring_scale;
-    // Axes from the camera's own view direction, which the pitch clamp keeps
-    // off vertical (the direction to the mother itself may not be).
-    const view = cam.target - eye;
-    const right = sim.cross(view, .{ 0, 1, 0 });
-    const u = sim.normalize(right) * sim.splat(r);
-    const v = sim.normalize(sim.cross(right, view)) * sim.splat(r);
-    drawCircle(at, u, v, ring_segments, 1, rl.getColor(link_gray));
+    // The camera's own axes (the direction to the mother itself may be vertical).
+    drawCircle(at, view[1] * sim.splat(r), view[2] * sim.splat(r), ring_segments, 1, 0, rl.getColor(link_gray));
 }
 
 /// A circle around `center` spanned by the radius vectors `u` and `v`, in
-/// `segments` straight pieces: every one (`step` 1) or every other (2, dotted).
-fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, color: rl.Color) void {
+/// `segments` straight pieces (`drawSegment`s of `width`): every one (`step`
+/// 1) or every other (2, dashed).
+fn drawCircle(center: sim.Vec3, u: sim.Vec3, v: sim.Vec3, segments: usize, step: usize, width: f32, color: rl.Color) void {
     var k: usize = 0;
     while (k < segments) : (k += step) {
         const a0 = std.math.tau * @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(segments));
         const a1 = std.math.tau * @as(f32, @floatFromInt(k + 1)) / @as(f32, @floatFromInt(segments));
         const p0 = center + u * sim.splat(@cos(a0)) + v * sim.splat(@sin(a0));
         const p1 = center + u * sim.splat(@cos(a1)) + v * sim.splat(@sin(a1));
-        rl.drawLine3D(vec3(p0), vec3(p1), color);
+        drawSegment(p0, p1, width, color);
     }
+}
+
+/// A straight piece from `a` to `b`: a line, or a tube of radius `width` if
+/// that is above 0.
+fn drawSegment(a: sim.Vec3, b: sim.Vec3, width: f32, color: rl.Color) void {
+    if (width > 0) rl.drawCylinderEx(vec3(a), vec3(b), width, width, tube_sides, color) else rl.drawLine3D(vec3(a), vec3(b), color);
 }
 
 fn ringRadius(mother: ecs.entity_t) f32 {
@@ -637,6 +706,8 @@ fn vec3(v: sim.Vec3) rl.Vector3 {
 // rlgl, part of the raylib library; raylib-zig doesn't export it as a module.
 extern fn rlDrawRenderBatchActive() void;
 extern fn rlGetShaderIdDefault() c_uint;
+extern fn rlDisableDepthMask() void;
+extern fn rlEnableDepthMask() void;
 
 /// One right-aligned readout line; `line` 0 is the top.
 fn drawStat(text: [:0]const u8, line: i32) void {
