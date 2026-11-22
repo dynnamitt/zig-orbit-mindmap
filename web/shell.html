@@ -13,7 +13,7 @@
        touch-action: drags and pinches steer the camera, not the page. */
     canvas { position: fixed; left: 0; top: 0; display: block; touch-action: none; }
     /* The title and status float over the scene and never catch input. */
-    h1, #status { position: fixed; margin: 0; pointer-events: none; }
+    h1, #status { position: fixed; z-index: 1; margin: 0; pointer-events: none; }
     h1 { left: 12px; top: 8px; font-size: 20px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
     #status { left: 0; right: 0; top: 50%; text-align: center; }
@@ -41,6 +41,12 @@
       print: function (text) { console.log(text); },
       printErr: function (text) { console.error(text); },
     };
+    // raylib resizes the canvas on window "resize", reading innerWidth/Height.
+    // Some mobile browsers (iOS Safari) still report the old size while a
+    // rotation is under way, so ask again once it has settled.
+    addEventListener("orientationchange", function () {
+      setTimeout(function () { dispatchEvent(new Event("resize")); }, 300);
+    });
     // Only startup failures replace the canvas status; later errors just log.
     window.onerror = function () { if (!started) Module.setStatus("failed to start — see the console"); };
   </script>

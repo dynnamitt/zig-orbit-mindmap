@@ -9,7 +9,7 @@ const config = @import("config");
 /// resizable, and on web raylib sizes it to the viewport.
 const long_side = 800;
 const short_side = 450;
-/// The smallest window (both sides), so the glow textures never reach 0.
+/// The smallest window (both sides; raylib clamps to it, natively and on web).
 const min_side = 64;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
@@ -164,8 +164,10 @@ var touch: sim.TouchSteer = .{};
 var alpha: f32 = 0;
 var eye: sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
-/// The window size the glow textures were made for.
-var glow_size: [2]i32 = undefined;
+/// The window size the camera is framed for (see `resize`).
+var view_size: [2]i32 = undefined;
+/// Whether `glow` holds textures for `view_size`; without them, no glow.
+var glow_ok = false;
 var stats: sim.FrameStats = .{};
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -197,9 +199,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     thrusters = try sim.ballQuery(world, sim.Thruster);
     defer ecs.query_fini(thrusters);
 
-    glow_size = screenSize();
-    glow = try loadGlow(glow_size);
-    defer unloadGlow();
+    view_size = screenSize();
+    glow = try loadGlow(view_size);
+    glow_ok = true;
+    defer if (glow_ok) unloadGlow();
     blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
     defer rl.unloadShader(blur);
     blur_tap = rl.getShaderLocation(blur, "tap");
@@ -233,7 +236,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
-    if (!std.meta.eql(screenSize(), glow_size)) resize();
+    if (!std.meta.eql(screenSize(), view_size)) resize();
     // Fixed steps, never raylib's raw dt: a long frame would otherwise
     // fling planets out of orbit, and dt=0 (first frame) would make
     // flecs measure its own clock.
@@ -253,7 +256,7 @@ fn frame() callconv(.c) void {
         .fovy = sim.OrbitCam.fovyFor(aspect()),
         .projection = .perspective,
     };
-    glowPass(frame_camera);
+    if (glow_ok) glowPass(frame_camera);
 
     rl.beginDrawing();
     defer rl.endDrawing();
@@ -271,7 +274,7 @@ fn frame() callconv(.c) void {
 
     // The blurred glow, added on top.
     rl.beginBlendMode(.additive);
-    for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = @floatFromInt(screenSize()[0]), .height = @floatFromInt(screenSize()[1]) }, .{ .x = 0, .y = 0 }, 0, .white);
+    if (glow_ok) for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = @floatFromInt(screenSize()[0]), .height = @floatFromInt(screenSize()[1]) }, .{ .x = 0, .y = 0 }, 0, .white);
     rl.endBlendMode();
     // Labels last, so the glow doesn't blur them.
     forEachDrawn(labels, drawLabel);
@@ -311,18 +314,19 @@ fn aspect() f32 {
 }
 
 /// Follow a new window size (resized, rotated or a new viewport on web): the
-/// glow textures and the camera's zoom. If the new glow textures can't be
-/// made, the old ones stay (stretched) and the next frame tries again.
+/// camera's zoom and the glow textures. If those can't be made, the scene
+/// goes without glow until the next resize tries again (not every frame:
+/// raylib leaks a failed render texture's framebuffer).
 fn resize() void {
     const size = screenSize();
-    if (size[0] < min_side or size[1] < min_side) return; // minimized
-    const fresh = loadGlow(size) catch return;
-    unloadGlow();
-    glow = fresh;
-    cam.reframe(aspectOf(glow_size), aspectOf(size));
-    glow_size = size;
+    cam.reframe(aspectOf(view_size), aspectOf(size));
+    view_size = size;
     // A drag in progress spans two layouts: start it afresh.
     touch = .{};
+    if (glow_ok) unloadGlow();
+    glow_ok = false;
+    glow = loadGlow(size) catch return;
+    glow_ok = true;
 }
 
 /// Glow textures for a window of `size`; none are left loaded on failure.
