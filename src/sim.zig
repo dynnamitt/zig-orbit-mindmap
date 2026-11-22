@@ -5,7 +5,7 @@ const ecs = @import("zflecs");
 
 // Star colours: the mother is the brightest (warm white), her children green.
 const mother_white: u32 = 0xFFF1D6FF;
-const child_green: u32 = 0x3DDC84FF; // phosphor green, as on an old terminal
+const child_green: u32 = 0x52D97FFF; // phosphor green, with enough red that the glow washes its core white
 
 // Star cluster (world units; masses only matter relative to each other). The
 // mother is slightly smaller than her children but heavier, and is held home
