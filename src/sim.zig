@@ -66,10 +66,14 @@ const chase_settle = 1.0;
 const switch_done = switch_time + chase_settle;
 /// Triangle corners' distance from its centre: corner to corner is a cord's rest length.
 const triangle_r = cord_rest / @sqrt(3.0);
-/// Breathing turn: the corners pull in to `breathe_min` × `triangle_r` and
-/// back each cycle, while the triangle sweeps ± `turn_sweep` radians.
-const breathe_min = 0.3;
-const turn_sweep = 0.7;
+/// Breathing turn (tuned in the prototype for padding): the corners sit
+/// `breathe_size` × `triangle_r` out, pull in to `breathe_min` of that and
+/// back each cycle, while the triangle sweeps ± `turn_sweep` radians (small,
+/// so it stays close to the 3-output look). Closest edge gaps: ~1.0 mother to
+/// child (1.1 at rest with 3 outputs), ~0.7 child to child.
+const breathe_size = 1.2;
+const breathe_min = 0.75;
+const turn_sweep = std.math.degreesToRadians(10.0);
 /// Through the middle (boxed, see `TwoDance`): along its corner's line a
 /// star swings `triangle_mid` ± `triangle_swing` (× `triangle_r`), from its
 /// corner (1) through the centre to the far edge (-0.5).
@@ -567,11 +571,14 @@ pub fn dancePose(style: TwoDance, n: u8, t: f32, home: Vec3, masses: [dancers]f3
             for (off[0 .. n + 1], 0..) |*o, j| {
                 const corner = @as(f32, @floatFromInt((j + 2) % 3)) * std.math.tau / 3;
                 o.* = switch (style) {
-                    .breathing_turn => ringFlat(corner + turn_sweep * @sin(u)) * splat(triangle_r * (breathe_min + (1 - breathe_min) * (0.5 + 0.5 * @cos(u)))),
+                    .breathing_turn => ringFlat(corner + turn_sweep * @sin(u)) * splat(triangle_r * breathe_size * (breathe_min + (1 - breathe_min) * (0.5 + 0.5 * @cos(u)))),
                     .through_middle => ringFlat(corner) * splat(triangle_r * (triangle_mid + triangle_swing * @cos(u + std.math.tau * @as(f32, @floatFromInt(j)) / 3))),
                 };
             }
-            break :blk triangle_r;
+            break :blk switch (style) {
+                .breathing_turn => triangle_r * breathe_size,
+                .through_middle => triangle_r,
+            };
         },
         1 => blk: {
             off[0] = ringFlat(0) * splat(cross_reach * @cos(u));
@@ -1888,4 +1895,23 @@ test "planets keep their orbits through output switches" {
             for (sc.ps) |e| try expect(slotOff(world, e) < 0.13);
         }
     }
+}
+
+test "breathing turn keeps the stars apart (edge gaps over a cycle)" {
+    const masses = [dancers]f32{ mother_mass, child_mass, child_mass, child_mass };
+    const radius = [dancers]f32{ mother_radius, child_radius, child_radius, child_radius };
+    var mother_child: f32 = std.math.inf(f32);
+    var child_child: f32 = std.math.inf(f32);
+    for (0..360) |s| {
+        const a = dancePose(.breathing_turn, 2, dance_period * @as(f32, @floatFromInt(s)) / 360, splat(0), masses);
+        const gap = struct {
+            fn f(pose: @TypeOf(a), r: [dancers]f32, i: usize, j: usize) f32 {
+                return distance(pose.pos[i], pose.pos[j]) - r[i] * pose.scale[i] - r[j] * pose.scale[j];
+            }
+        }.f;
+        mother_child = @min(mother_child, gap(a, radius, 0, 1), gap(a, radius, 0, 2));
+        child_child = @min(child_child, gap(a, radius, 1, 2));
+    }
+    try expect(mother_child > 0.9); // 1.1 at rest with 3 outputs
+    try expect(child_child > 0.6);
 }
