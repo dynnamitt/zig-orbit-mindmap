@@ -53,9 +53,11 @@ const planet_settle = 0.1;
 // two rings interleave.
 const planet_ring_r = 9.0;
 const planet_ring_bump = 2.5;
-pub const planet_ring_max = 8;
+const planet_ring_max = 8;
 const planet_radius = 0.35;
 const planet_tilt = 0.06;
+/// Every planet orbit tilts `planet_tilt` about this axis.
+const planet_tilt_axis: Vec3 = .{ 1, 0, 0 };
 // One colour per planet: the tech-trio.svg palette (teal, orange, sand, light
 // gray) with lighter, darker and nearby shades; cycled past twelve planets.
 const planet_colors = [_]u32{
@@ -586,45 +588,51 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     return c;
 }
 
-/// Where planet `i` of `n` orbits: its ring radius and its angle on it.
-pub const PlanetSlot = struct { r: f32, phase: f32 };
+/// Where planet `i` of `n` orbits.
+const PlanetSlot = struct {
+    /// 0: the default ring, 1: the bumped one.
+    ring: u1,
+    r: f32,
+    /// Unit vectors from the barycenter: outward to the planet, and its
+    /// direction of travel (counter-clockwise seen from above), both on the
+    /// tilted orbit plane.
+    dir: Vec3,
+    along: Vec3,
+};
 
-pub fn planetSlot(i: usize, n: usize) PlanetSlot {
-    const bumped = n > planet_ring_max and i % 2 == 1;
+fn planetSlot(i: usize, n: usize) PlanetSlot {
+    const ring: u1 = @intFromBool(n > planet_ring_max and i % 2 == 1);
+    const phase = std.math.tau * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n));
     return .{
-        .r = if (bumped) planet_ring_r + planet_ring_bump else planet_ring_r,
-        .phase = std.math.tau * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n)),
+        .ring = ring,
+        .r = planet_ring_r + @as(f32, @floatFromInt(ring)) * planet_ring_bump,
+        .dir = rotate(.{ @cos(phase), 0, -@sin(phase) }, planet_tilt_axis, planet_tilt),
+        .along = rotate(.{ -@sin(phase), 0, -@cos(phase) }, planet_tilt_axis, planet_tilt),
     };
 }
 
-/// `out.len` planets laid out by `planetSlot` around the current barycenter
-/// (so spawn the cluster first), each an input of `mother`. Each ring's
-/// planets share one speed: the circular speed for the stars' mean inward
-/// pull on that ring (the cluster is lumpy, so the pull varies a little
-/// around it).
-pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, out: []ecs.entity_t) void {
+/// `n` planets laid out by `planetSlot` around the current barycenter (so
+/// spawn the cluster first), each an input of `mother`. Each ring's planets
+/// share one speed: the circular speed for the stars' mean inward pull on
+/// that ring (the cluster is lumpy, so the pull varies a little around it).
+pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize) [n]ecs.entity_t {
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
-    const tilt_axis: Vec3 = .{ 1, 0, 0 }; // every orbit tilts about x
-    var inward = [2]f32{ 0, 0 }; // summed inward pull, per ring (default, bumped)
+    var inward = [2]f32{ 0, 0 }; // summed inward pull, per ring
     var on_ring = [2]f32{ 0, 0 };
-    for (0..out.len) |i| {
-        const slot = planetSlot(i, out.len);
-        const dir = rotate(.{ @cos(slot.phase), 0, -@sin(slot.phase) }, tilt_axis, planet_tilt);
-        const ring: usize = @intFromBool(slot.r != planet_ring_r);
-        inward[ring] += -dot(fieldPull(f, f.center + dir * splat(slot.r)), dir);
-        on_ring[ring] += 1;
+    for (0..n) |i| {
+        const slot = planetSlot(i, n);
+        inward[slot.ring] += -dot(fieldPull(f, f.center + slot.dir * splat(slot.r)), slot.dir);
+        on_ring[slot.ring] += 1;
     }
-    for (out, 0..) |*e, i| {
-        const slot = planetSlot(i, out.len);
-        const ring: usize = @intFromBool(slot.r != planet_ring_r);
-        // v²/r = inward pull.
-        const speed = @sqrt(@max(0, inward[ring] / on_ring[ring]) * slot.r);
-        // Outward and counter-clockwise (seen from above) at `phase`, tilted.
-        const dir = rotate(.{ @cos(slot.phase), 0, -@sin(slot.phase) }, tilt_axis, planet_tilt);
-        const along = rotate(.{ -@sin(slot.phase), 0, -@cos(slot.phase) }, tilt_axis, planet_tilt);
-        // Plus the barycenter's own drift, so the orbit is circular around it.
-        e.* = spawnPlanet(world, mother, f.center + dir * splat(slot.r), f.drift + along * splat(speed), planet_colors[i % planet_colors.len]);
+    var out: [n]ecs.entity_t = undefined;
+    for (&out, 0..) |*e, i| {
+        const slot = planetSlot(i, n);
+        // v²/r = inward pull; plus the barycenter's own drift, so the orbit is
+        // circular around it.
+        const speed = @sqrt(@max(0, inward[slot.ring] / on_ring[slot.ring]) * slot.r);
+        e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planet_colors[i % planet_colors.len]);
     }
+    return out;
 }
 
 fn spawnPlanet(world: *ecs.world_t, mother: ecs.entity_t, p: Vec3, v: Vec3, rgba: u32) ecs.entity_t {
@@ -704,15 +712,7 @@ fn positionOf(world: *ecs.world_t, e: ecs.entity_t) Vec3 {
 /// The cluster and `n` planets: the scene, for tests.
 fn spawnScene(world: *ecs.world_t, comptime n: usize) struct { c: Cluster, ps: [n]ecs.entity_t } {
     const c = spawnCluster(world, .{ 0, 0, 0 });
-    var ps: [n]ecs.entity_t = undefined;
-    spawnPlanets(world, c.mother, &ps);
-    return .{ .c = c, .ps = ps };
-}
-
-/// A planet's angle on its orbit plane around `center`, radians.
-fn orbitAngle(p: Vec3, center: Vec3) f32 {
-    const flat = rotate(p - center, .{ 1, 0, 0 }, -planet_tilt);
-    return std.math.atan2(-flat[2], flat[0]);
+    return .{ .c = c, .ps = spawnPlanets(world, c.mother, n) };
 }
 
 test "move system integrates velocity over delta time" {
@@ -893,7 +893,7 @@ test "planets stay near their orbits and planes for two minutes" {
             const slot_r = planetSlot(i, planet_count).r;
             const r = length(d) / slot_r;
             try expect(r > 0.85 and r < 1.2);
-            try expect(@abs(rotate(d, .{ 1, 0, 0 }, -planet_tilt)[1]) / slot_r < 0.13);
+            try expect(@abs(rotate(d, planet_tilt_axis, -planet_tilt)[1]) / slot_r < 0.13);
         }
     }
 }
@@ -921,43 +921,27 @@ test "pull sums every star, weighted by mass" {
     try expectEqual(@as(f32, 0), v[1]);
 }
 
-test "planetSlot: one even ring, or a bumped ring for odd planets past the max" {
-    for (0..6) |i| {
-        const slot = planetSlot(i, 6);
-        try expectEqual(@as(f32, planet_ring_r), slot.r);
-        try expectApproxEqAbs(std.math.tau * @as(f32, @floatFromInt(i)) / 6, slot.phase, 1e-6);
-    }
-    const n = planet_ring_max + 2;
-    for (0..n) |i| {
-        const slot = planetSlot(i, n);
-        const want: f32 = if (i % 2 == 1) planet_ring_r + planet_ring_bump else planet_ring_r;
-        try expectEqual(want, slot.r);
-        try expectApproxEqAbs(std.math.tau * @as(f32, @floatFromInt(i)) / n, slot.phase, 1e-6);
-    }
-}
-
-test "planets: same size and speed per ring, evenly spaced on one plane, colours differ" {
+test "planets: one even ring (or a bumped one for odd planets past the max), same size and speed per ring, one plane, colours differ" {
     inline for (.{ planet_count, planet_ring_max + 2 }) |n| {
         const world = ecs.init();
         defer _ = ecs.fini(world);
         register(world);
         const sc = spawnScene(world, n);
         const f = ecs.get(world, ecs.id(StarField), StarField).?;
+        const normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
         var speed = [2]?f32{ null, null };
         for (sc.ps, 0..) |e, i| {
             const slot = planetSlot(i, n);
+            try expectEqual(@as(u1, @intFromBool(n > planet_ring_max and i % 2 == 1)), slot.ring);
             const d = positionOf(world, e) - f.center;
             const v = ecs.get(world, e, Velocity).?.v - f.drift;
-            try expectApproxEqAbs(slot.r, length(d), 1e-3);
-            try expectApproxEqAbs(@as(f32, 0), dot(v, d), 1e-2); // tangential
-            // One plane: every orbit's axis is +y tilted by planet_tilt about x.
-            const axis = normalize(cross(d, v));
-            try expect(distance(axis, rotate(.{ 0, 1, 0 }, .{ 1, 0, 0 }, planet_tilt)) < 1e-4);
-            // The same angle apart.
-            try expectApproxEqAbs(@mod(slot.phase + std.math.pi, std.math.tau) - std.math.pi, orbitAngle(positionOf(world, e), f.center), 1e-4);
+            try expectApproxEqAbs(planet_ring_r + @as(f32, @floatFromInt(slot.ring)) * planet_ring_bump, length(d), 1e-3);
+            // The same angle apart, on one tilted plane.
+            const phase = std.math.tau * @as(f32, @floatFromInt(i)) / n;
+            try expect(distance(normalize(d), rotate(.{ @cos(phase), 0, -@sin(phase) }, planet_tilt_axis, planet_tilt)) < 1e-4);
+            try expect(distance(normalize(cross(d, v)), normal) < 1e-4); // tangential, on the plane
             // One speed per ring.
-            const ring: usize = @intFromBool(slot.r != planet_ring_r);
-            if (speed[ring]) |s0| try expectApproxEqAbs(s0, length(v), 1e-4) else speed[ring] = length(v);
+            if (speed[slot.ring]) |s0| try expectApproxEqAbs(s0, length(v), 1e-4) else speed[slot.ring] = length(v);
             const b = ecs.get(world, e, Ball).?;
             try expectEqual(@as(f32, planet_radius), b.radius);
             try expectEqual(planet_colors[i % planet_colors.len], b.rgba);
@@ -973,9 +957,7 @@ test "a planet spawned mid-wobble starts circular around the drifting barycenter
     step(world, 200); // the barycenter is drifting by now
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     try expect(length(f.drift) > 1e-3);
-    var ps: [1]ecs.entity_t = undefined;
-    spawnPlanets(world, c.mother, &ps);
-    const p = ps[0];
+    const p = spawnPlanets(world, c.mother, 1)[0];
     const d = positionOf(world, p) - f.center;
     // No radial motion relative to the barycenter.
     try expectApproxEqAbs(@as(f32, 0), dot(ecs.get(world, p, Velocity).?.v - f.drift, d), 1e-2);
@@ -1079,15 +1061,13 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     defer _ = ecs.fini(world);
     register(world);
     const sc = spawnScene(world, planet_count);
-    const c = sc.c;
-    const ps = sc.ps;
     const mq = try ballQuery(world, Mother);
     defer ecs.query_fini(mq);
     var mothers: usize = 0;
     var mother_ok = true;
     var mit = ecs.query_iter(world, mq);
     while (ecs.query_next(&mit)) {
-        for (mit.entities()) |e| mother_ok = mother_ok and e == c.mother;
+        for (mit.entities()) |e| mother_ok = mother_ok and e == sc.c.mother;
         mothers += mit.count();
     }
     try expect(mother_ok);
@@ -1099,20 +1079,20 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     var stars: usize = 0;
     var sit = ecs.query_iter(world, sq);
     while (ecs.query_next(&sit)) stars += sit.count();
-    try expectEqual(1 + c.children.len, stars);
+    try expectEqual(1 + sc.c.children.len, stars);
 
     const cords = try linkQuery(world, Cord);
     defer ecs.query_fini(cords);
     const inputs = try linkQuery(world, InputOf);
     defer ecs.query_fini(inputs);
-    for ([_]*ecs.query_t{ cords, inputs }, [_]usize{ c.children.len, ps.len }) |q, want| {
+    for ([_]*ecs.query_t{ cords, inputs }, [_]usize{ sc.c.children.len, sc.ps.len }) |q, want| {
         // Collect first, check after: a failed check mid-iteration would
         // leave the iterator unfinished.
         var n: usize = 0;
         var targets_ok = true;
         var it = ecs.query_iter(world, q);
         while (ecs.query_next(&it)) {
-            targets_ok = targets_ok and pairTarget(&it, 2) == c.mother and ecs.field(&it, PrevPosition, 1) != null;
+            targets_ok = targets_ok and pairTarget(&it, 2) == sc.c.mother and ecs.field(&it, PrevPosition, 1) != null;
             n += it.count();
         }
         try expect(targets_ok);
