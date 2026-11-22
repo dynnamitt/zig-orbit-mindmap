@@ -541,17 +541,19 @@ fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 fn drawThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
     const r = ecs.field(it, sim.Ball, 2).?[i].radius;
-    if (t.on) drawFlame(at, -t.dir, r, flameColor(t.time), t.time) else drawNozzle(at, -t.dir, r, rl.getColor(nozzle_idle));
+    if (t.on) drawFlame(at, -t.dir, r, t.time, 0) else drawNozzle(at, -t.dir, r, rl.getColor(nozzle_idle));
 }
 
 /// The glow pass's share: only a firing thruster glows.
 fn drawFiringThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
-    if (t.on) drawFlame(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, rl.colorBrightness(flameColor(t.time), flame_glow), t.time);
+    if (t.on) drawFlame(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, t.time, flame_glow);
 }
 
-/// A firing thruster: the nozzle and its beam, in `color`.
-fn drawFlame(at: sim.Vec3, back: sim.Vec3, r: f32, color: rl.Color, time: f32) void {
+/// A firing thruster: the nozzle and its beam, in the flame colour at
+/// `brightness` (rl.colorBrightness: 0 as is, below 0 darker).
+fn drawFlame(at: sim.Vec3, back: sim.Vec3, r: f32, time: f32, brightness: f32) void {
+    const color = rl.colorBrightness(flameColor(time), brightness);
     drawNozzle(at, back, r, color);
     drawBeam(at, back, r, color, time);
 }

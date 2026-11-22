@@ -407,6 +407,7 @@ fn pull(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity) vo
 fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, slots: []Slot, thrusters: []Thruster) void {
     const f = &ecs.field(it, StarField, thrust_field).?[0];
     const dt = it.delta_time;
+    const aim = 1 - @exp(-thrust_aim * dt); // an idle nozzle's easing this step
     for (positions, velocities, slots, thrusters) |p, *v, *slot, *t| {
         // Compare with the slot where it is now, then move the slot on.
         defer slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
@@ -417,18 +418,16 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
         if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
         var a = (target - p.v) * splat(thrust_k) + (target_v - v.v) * splat(thrust_damp);
         const n = length(a);
+        const push = if (n > 0) a / splat(n) else t.dir;
         if (n > thrust_max) a *= splat(thrust_max / n);
         if (!t.on) {
             // Idle, the nozzle eases toward the push it would give, so it is
             // already aimed when it fires (no snap at ignition).
-            if (n > 0) {
-                const eased = std.math.lerp(t.dir, a / splat(n), splat(1 - @exp(-thrust_aim * dt)));
-                if (length(eased) > 0) t.dir = normalize(eased);
-            }
+            t.dir = normalize(std.math.lerp(t.dir, push, splat(aim)));
             t.time = 0;
             continue;
         }
-        if (n > 0) t.dir = a / splat(@min(n, thrust_max));
+        t.dir = push;
         v.v += a * splat(dt);
         t.time += dt;
     }
