@@ -15,7 +15,7 @@ A 3D star system as an IPO (input → process → output) mind map, in Zig 0.17 
 - **Inputs:** planets on elliptical orbits around the cluster's centre of gravity, pulled by every star. Each has a dashed line to the mother's ring, in the colour of its orbit ring (amber inner, cyan outer) and brighter toward the centre, and a thruster that fires to bring it back to its slot on the ring.
 - **Backdrop:** a shader starfield that turns with the camera.
 
-Drag (or one finger) to orbit the camera; scroll (or pinch) to zoom. The window resizes freely, and
+Drag (or one finger) to orbit the camera; scroll (or pinch) to zoom. The − and + buttons at the top left remove and add outputs: with one or two left, the stars switch to a "waiting" dance. The window resizes freely, and
 in the browser it fills the viewport in either orientation.
 
 ```sh
