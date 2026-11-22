@@ -41,6 +41,62 @@ const children = [_]ChildData{
 /// Most stars the `cluster` system handles (it works on all of them at once).
 pub const max_stars = 16;
 
+// The waiting dance (#23): with 1 or 2 outputs left, the stars leave the
+// cord springs and chase moving targets on springs of their own (they lag
+// and wobble a little); removed outputs are parked inside the mother (her
+// target, mass kept, scale 0), so the planets' gravity doesn't change. Each
+// switch eases the targets over `switch_time` from where the stars were, and
+// back at all outputs the cord springs take over from the spawn layout, so
+// the cluster breathes as it did at the start. 2 outputs (`two_output_dance`):
+// mother and children on a level triangle's corners that sweeps back and
+// forth round its centre, pulling in as it turns. 1 output: mother and child
+// take turns through the centre on crossed lines. The targets are shifted so
+// the barycenter stays on the mother's `Home`; moving stars shrink toward
+// the centre.
+const dance_period = 2.4; // seconds per cycle
+/// At 1 output the cycle (the child's lap round the mother) is this many
+/// times longer: calmer. Whole, so the dance clock wraps cleanly at both.
+const one_output_slow = 3;
+const dance_shrink = 0.55; // scale at the centre
+const switch_time = 1.2;
+/// The chase: stiffness (per s²) and damping ratio, under 1 so it wobbles.
+const dance_k = 70.0;
+const dance_damping = 0.55;
+/// Back at all outputs, the stars keep chasing the spawn layout this long
+/// after the switch, so they hand the cord springs (undamped) almost no
+/// momentum; without it the whole cluster swings by ~1.
+const chase_settle = 1.0;
+const switch_done = switch_time + chase_settle;
+/// Triangle corners' distance from its centre: corner to corner is a cord's rest length.
+const triangle_r = cord_rest / @sqrt(3.0);
+/// Breathing turn (tuned in the prototype for padding): the corners sit
+/// `breathe_size` × `triangle_r` out, pull in to `breathe_min` of that and
+/// back each cycle, while the triangle sweeps ± `turn_sweep` radians (small,
+/// so it stays close to the 3-output look). Closest edge gaps: ~1.0 mother to
+/// child (1.1 at rest with 3 outputs), ~0.7 child to child.
+const breathe_size = 1.2;
+const breathe_min = 0.75;
+const turn_sweep = std.math.degreesToRadians(10.0);
+/// Through the middle (boxed, see `TwoDance`): along its corner's line a
+/// star swings `triangle_mid` ± `triangle_swing` (× `triangle_r`), from its
+/// corner (1) through the centre to the far edge (-0.5).
+const triangle_mid = 0.25;
+const triangle_swing = 0.75;
+/// How far mother and child swing out on their crossed lines.
+const cross_reach = 0.85 * cord_rest;
+// Springs at all 3 outputs, a dance at 1 and 2: the table must hold exactly 3.
+comptime {
+    std.debug.assert(children.len == 3);
+}
+/// Most outputs the scene shows (the children table).
+pub const output_max: u8 = children.len;
+/// Stars in the dance: the mother (slot 0), then each output by index.
+const dancers = 1 + children.len;
+/// The 2-output dances, as in the prototype (Waiting Dance Lab): C
+/// "breathing turn" is the scene's; A "through the middle" is kept, unused.
+pub const TwoDance = enum { breathing_turn, through_middle };
+const two_output_dance: TwoDance = .breathing_turn;
+
 // Planets (the IPO's inputs): every star pulls each one with g·mass/r²,
 // softened so a close pass stays finite. g sets the pace: the inner ring
 // takes ~29 s a lap; the cluster's springs don't use it. The cluster is lumpy
@@ -162,8 +218,19 @@ pub const Velocity = struct { v: Vec3 };
 /// between fixed steps. Only moving entities need it.
 pub const PrevPosition = struct { v: Vec3 };
 /// Something to draw: a sphere. `rgba` is 0xRRGGBBAA so this module stays
-/// free of raylib types.
-pub const Ball = struct { radius: f32, rgba: u32 };
+/// free of raylib types. `scale` shrinks it while it dances (0: parked).
+pub const Ball = struct {
+    radius: f32,
+    rgba: u32,
+    scale: f32 = 1,
+
+    /// The radius to draw at.
+    /// @param b Ball the ball
+    /// @returns f32 `radius` × `scale`
+    pub fn size(b: Ball) f32 {
+        return b.radius * b.scale;
+    }
+};
 /// A star: takes part in the cluster forces, weighted by `mass`.
 pub const Star = struct { mass: f32 };
 /// Relationship `(Cord, mother)`: a spring of `rest` length between this star
@@ -213,6 +280,22 @@ pub const Label = struct { text: [:0]const u8 };
 /// Tag: the mother star (the IPO's process). Her children hang on cords;
 /// planets are her inputs.
 pub const Mother = struct {};
+/// An output (child star) by its place in the scene's table: `setOutputs(n)`
+/// keeps outputs 0…n-1 and parks the rest in the mother.
+pub const Output = struct { index: u8 };
+/// Singleton on `ecs.id(Waiting)`: how many outputs are shown, and the
+/// switch-over and dance clocks `cluster` runs.
+pub const Waiting = struct {
+    outputs: u8 = output_max,
+    /// Seconds since the latest switch began (0: it starts on the next step,
+    /// which takes the `from_*` state; done at `switch_done`), and into the dance.
+    since: f32 = switch_done,
+    clock: f32 = 0,
+    /// Each dancer's state as the switch began, by slot (0 the mother, then
+    /// outputs by index).
+    from_pos: [dancers]Vec3 = @splat(splat(0)),
+    from_scale: [dancers]f32 = @splat(1),
+};
 /// Relationship `(InputOf, mother)`: a planet feeds this mother star. It
 /// only links them (for drawing and labels); gravity comes from every star.
 pub const InputOf = struct {};
@@ -255,8 +338,11 @@ pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, Thruster);
     ecs.TAG(world, Mother);
     ecs.TAG(world, InputOf);
+    ecs.COMPONENT(world, Output);
+    ecs.COMPONENT(world, Waiting);
     // Before any star exists: system terms on singletons need them to match.
     set(world, ecs.id(StarField), StarField, .{});
+    set(world, ecs.id(Waiting), Waiting, .{});
     set(world, ecs.id(Barycenter), Position, .{ .v = splat(0) });
     set(world, ecs.id(Barycenter), PrevPosition, .{ .v = splat(0) });
     addSystem(world, "snapshot", ecs.OnLoad, snapshot, &.{});
@@ -269,6 +355,9 @@ pub fn register(world: *ecs.world_t) void {
         .{ .id = ecs.id(Star), .inout = .In },
         .{ .id = ecs.pair(ecs.id(Cord), ecs.Wildcard), .inout = .In, .oper = .Optional },
         .{ .id = ecs.id(Home), .inout = .In, .oper = .Optional },
+        .{ .id = ecs.id(Ball), .inout = .InOut },
+        .{ .id = ecs.id(Output), .inout = .In, .oper = .Optional },
+        .{ .id = ecs.id(Waiting), .src = .{ .id = ecs.id(Waiting) }, .inout = .InOut },
     });
     addSystem(world, "pull", ecs.PreUpdate, pull, &.{
         .{ .id = ecs.id(Planet), .inout = .InOutNone },
@@ -317,6 +406,9 @@ const cluster_vel = 1;
 const cluster_star = 2;
 const cluster_cord = 3;
 const cluster_home = 4;
+const cluster_ball = 5;
+const cluster_output = 6;
+const cluster_waiting = 7;
 // pull's extra terms come after its own two params.
 const pull_field = 3;
 // thrust's extra term comes after its own four params (fields 0-3).
@@ -336,13 +428,23 @@ const Body = struct {
     vel: *Vec3,
     cord: ?struct { mother: ecs.entity_t, rest: f32 },
     home: ?Vec3,
+    scale: *f32,
+    /// Its place in the dance: 0 the mother (the star with a `Home`), then
+    /// outputs by index; null for other stars.
+    slot: ?usize,
 };
 
-/// Cord springs, pair pushes and the home anchor, on every star at once.
+/// Cord springs, pair pushes and the home anchor, on every star at once; and
+/// with outputs removed (or a switch under way), the waiting dance, which
+/// drives the dancers toward its targets instead.
 fn cluster(it: *ecs.iter_t) callconv(.c) void {
     var bodies: [max_stars]Body = undefined;
     var n: usize = 0;
+    var waiting: ?*Waiting = null;
     while (ecs.iter_next(it)) {
+        waiting = &ecs.field(it, Waiting, cluster_waiting).?[0];
+        const balls = ecs.field(it, Ball, cluster_ball).?;
+        const outs = ecs.field(it, Output, cluster_output);
         const cords = ecs.field(it, Cord, cluster_cord);
         const mother = if (cords != null) pairTarget(it, cluster_cord) else 0;
         const homes = ecs.field(it, Home, cluster_home);
@@ -361,12 +463,42 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
                 .vel = &v.v,
                 .cord = if (cords) |c| .{ .mother = mother, .rest = c[i].rest } else null,
                 .home = if (homes) |h| h[i].v else null,
+                .scale = &balls[i].scale,
+                .slot = if (outs) |o| 1 + @as(usize, o[i].index) else if (homes != null) 0 else null,
             };
             n += 1;
         }
     }
     const bs = bodies[0..n];
+    const dt = it.delta_time;
+    const w = waiting orelse return springs(bs, dt);
+    w.clock = @mod(w.clock + dt, dance_period * one_output_slow);
+    if (w.outputs == output_max and w.since >= switch_done) return springs(bs, dt);
 
+    // The dance (or a switch): every dancer's place at the end of this step.
+    if (w.since == 0) for (bs) |b| if (b.slot) |k| {
+        w.from_pos[k] = b.pos;
+        w.from_scale[k] = b.scale.*;
+    };
+    w.since = @min(w.since + dt, switch_done);
+    var masses: [dancers]f32 = @splat(0);
+    for (bs) |b| if (b.slot) |j| {
+        masses[j] = b.mass;
+    };
+    const home = for (bs) |b| (if (b.slot == 0) break b.home.?) else return;
+    const to = dancePose(two_output_dance, w.outputs, w.clock, home, masses);
+    const k = @min(1, w.since / switch_time);
+    const ease = k * k * (3 - 2 * k);
+    const damp = 2 * dance_damping * @sqrt(dance_k);
+    for (bs) |b| if (b.slot) |j| {
+        const target = std.math.lerp(w.from_pos[j], to.pos[j], splat(ease));
+        b.vel.* += ((target - b.pos) * splat(dance_k) - b.vel.* * splat(damp)) * splat(dt);
+        b.scale.* = std.math.lerp(w.from_scale[j], to.scale[j], ease);
+    };
+}
+
+/// Cord springs, pair pushes and the home anchor on `bs`, over `dt`.
+fn springs(bs: []const Body, dt: f32) void {
     var acc: [max_stars]Vec3 = @splat(splat(0));
     for (bs, 0..) |b, i| {
         if (b.home) |h| acc[i] += (h - b.pos) * splat(home_k / b.mass);
@@ -392,7 +524,100 @@ fn cluster(it: *ecs.iter_t) callconv(.c) void {
             acc[j] -= f / splat(o.mass);
         }
     }
-    for (bs, acc[0..n]) |b, a| b.vel.* += a * splat(it.delta_time);
+    for (bs, acc[0..bs.len]) |b, a| b.vel.* += a * splat(dt);
+}
+
+/// Shows `n` outputs, clamped to 1…`output_max`; the rest park in the mother.
+/// A change starts a switch-over from where the stars are now.
+/// @param world *ecs.world_t the scene
+/// @param n usize outputs wanted
+pub fn setOutputs(world: *ecs.world_t, n: usize) void {
+    const w = ecs.get_mut(world, ecs.id(Waiting), Waiting).?;
+    const m: u8 = @intCast(std.math.clamp(n, 1, output_max));
+    if (m != w.outputs) {
+        w.outputs = m;
+        w.since = 0;
+    }
+}
+
+/// How many outputs are shown.
+/// @param world *ecs.world_t the scene
+/// @returns u8 1…`output_max`
+pub fn outputs(world: *ecs.world_t) u8 {
+    return ecs.get(world, ecs.id(Waiting), Waiting).?.outputs;
+}
+
+/// Where each dancer belongs, and its scale, by slot (0 the mother, then
+/// outputs by index), `t` seconds into the dance with `n` outputs shown.
+/// At all outputs that is the spawn layout the springs start from; at 1 or
+/// 2 the dance, shifted so the barycenter (by `masses`) stays on `home`.
+/// @param style TwoDance which dance at 2 outputs
+/// @param n u8 outputs shown, 1…`output_max`
+/// @param t f32 seconds into the dance
+/// @param home Vec3 the mother's anchor
+/// @param masses [dancers]f32 each dancer's `Star.mass`, by slot
+/// @returns struct { pos, scale } one entry per slot
+pub fn dancePose(style: TwoDance, n: u8, t: f32, home: Vec3, masses: [dancers]f32) struct { pos: [dancers]Vec3, scale: [dancers]f32 } {
+    var off: [dancers]Vec3 = @splat(splat(0));
+    var scale: [dancers]f32 = @splat(1);
+    const u = std.math.tau * t / cycle(n);
+    const reach: f32 = switch (n) {
+        output_max => {
+            var pos: [dancers]Vec3 = @splat(home);
+            for (pos[1..], 0..) |*p, i| p.* += childStart(i);
+            return .{ .pos = pos, .scale = scale };
+        },
+        2 => blk: {
+            // Corners: the mother where the parked output was (240°),
+            // outputs 0 and 1 where they started (0° and 120°), so the
+            // switch moves little.
+            for (off[0 .. n + 1], 0..) |*o, j| {
+                const corner = @as(f32, @floatFromInt((j + 2) % 3)) * std.math.tau / 3;
+                o.* = switch (style) {
+                    .breathing_turn => ringFlat(corner + turn_sweep * @sin(u)) * splat(triangle_r * breathe_size * (breathe_min + (1 - breathe_min) * (0.5 + 0.5 * @cos(u)))),
+                    .through_middle => ringFlat(corner) * splat(triangle_r * (triangle_mid + triangle_swing * @cos(u + std.math.tau * @as(f32, @floatFromInt(j)) / 3))),
+                };
+            }
+            break :blk switch (style) {
+                .breathing_turn => triangle_r * breathe_size,
+                .through_middle => triangle_r,
+            };
+        },
+        1 => blk: {
+            off[0] = ringFlat(0) * splat(cross_reach * @cos(u));
+            off[1] = ringFlat(std.math.pi / 2.0) * splat(cross_reach * @sin(u));
+            break :blk cross_reach;
+        },
+        else => unreachable,
+    };
+    for (&off, &scale, 0..) |*o, *sc, j| {
+        if (j > n) {
+            o.* = off[0]; // parked in the mother
+            sc.* = 0;
+        } else sc.* = dance_shrink + (1 - dance_shrink) * @min(1, length(o.*) / reach);
+    }
+    // Shifted so the stars' mass center sits on `home`.
+    const shift = massCenter(&off, &masses) orelse splat(0);
+    var pos: [dancers]Vec3 = undefined;
+    for (&pos, off) |*p, o| p.* = home + o - shift;
+    return .{ .pos = pos, .scale = scale };
+}
+
+/// Seconds per dance cycle with `n` outputs shown.
+fn cycle(n: u8) f32 {
+    return if (n == 1) dance_period * one_output_slow else dance_period;
+}
+
+/// Unit vector at `angle` on the level xz plane (the cluster's): 0 along +x,
+/// counter-clockwise seen from above.
+fn ringFlat(angle: f32) Vec3 {
+    return .{ @cos(angle), 0, -@sin(angle) };
+}
+
+/// Where output `i` starts, from the mother: a little off its cord's rest
+/// length, so the cluster wobbles.
+fn childStart(i: usize) Vec3 {
+    return ringFlat(std.math.tau * @as(f32, @floatFromInt(i)) / children.len) * splat(cord_rest * (1 + children[i].stretch));
 }
 
 /// Every star's pull on every planet.
@@ -718,12 +943,11 @@ pub fn spawnCluster(world: *ecs.world_t, at: Vec3) Cluster {
     f.mass[0] = mother_mass;
 
     for (&c.children, children, 1..) |*child, data, i| {
-        const angle = std.math.tau * @as(f32, @floatFromInt(i - 1)) / children.len;
-        const r = cord_rest * (1 + data.stretch);
-        const p = at + Vec3{ r * @cos(angle), 0, -r * @sin(angle) };
+        const p = at + childStart(i - 1);
         child.* = spawnStar(world, p, child_mass, child_radius, child_green);
         setPair(world, child.*, Cord, c.mother, .{ .rest = cord_rest });
         set(world, child.*, Label, .{ .text = data.name });
+        set(world, child.*, Output, .{ .index = @intCast(i - 1) });
         f.pos[i] = p;
         f.mass[i] = child_mass;
     }
@@ -823,7 +1047,7 @@ pub fn eccentricAnomaly(mean_anomaly: f32, e: f32) f32 {
 /// Unit vector at `angle` on the (tilted) planet plane: 0 along +x, then
 /// counter-clockwise seen from above.
 pub fn ringDir(angle: f32) Vec3 {
-    return rotate(.{ @cos(angle), 0, -@sin(angle) }, planet_tilt_axis, planet_tilt);
+    return rotate(ringFlat(angle), planet_tilt_axis, planet_tilt);
 }
 
 /// The planets' (tilted) plane's normal: up, for `ringDir`'s counter-clockwise.
@@ -1578,4 +1802,137 @@ test "thrusters: every planet stays near its slot (and the even spacing) for two
         // A 10-minute probe stayed within 0.10 radii.
         for (sc.ps) |e| try expect(slotOff(world, e) < 0.13);
     }
+}
+
+test "dancePose: periodic, level, barycenter on home, shrinks at the centre, parks the rest in the mother" {
+    const home: Vec3 = .{ 1, 0, -2 };
+    const masses = [dancers]f32{ 1, 0.5, 0.7, 0.3 }; // any masses: the barycenter still holds
+    for ([_]struct { TwoDance, u8 }{ .{ .breathing_turn, 1 }, .{ .breathing_turn, 2 }, .{ .through_middle, 2 } }) |case| {
+        const style, const n = case;
+        var min_scale: f32 = 1;
+        for (0..240) |s| {
+            const t = cycle(n) * @as(f32, @floatFromInt(s)) / 240;
+            const a = dancePose(style, n, t, home, masses);
+            const later = dancePose(style, n, t + cycle(n), home, masses);
+            for (a.pos, later.pos) |p, q| try expect(distance(p, q) < 1e-3);
+            try expect(distance(massCenter(&a.pos, &masses).?, home) < 1e-4);
+            for (a.pos, a.scale, 0..) |p, sc, j| {
+                try expect(distance(p, home) < 2 * cord_rest);
+                try expectApproxEqAbs(home[1], p[1], 1e-5); // level
+                if (j > n) {
+                    try expect(distance(p, a.pos[0]) < 1e-5);
+                    try expectEqual(@as(f32, 0), sc);
+                } else {
+                    try expect(sc >= dance_shrink - 1e-5 and sc <= 1);
+                    min_scale = @min(min_scale, sc);
+                }
+            }
+        }
+        // Through the centre the shrink is full; the breathing turn only pulls in to `breathe_min`.
+        const least: f32 = if (n == 2 and style == .breathing_turn) dance_shrink + (1 - dance_shrink) * breathe_min else dance_shrink;
+        try expectApproxEqAbs(least, min_scale, 0.03);
+    }
+}
+
+test "setOutputs: 3 → 2 → 1 → 3 without jumps; parked outputs sit in the mother; mass kept" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const c = spawnCluster(world, splat(0));
+    step(world, 30);
+    const stars = [_]ecs.entity_t{c.mother} ++ c.children;
+    const mass = starMass(world);
+    var prev: [stars.len]Vec3 = undefined;
+    for (stars, &prev) |e, *v| v.* = ecs.get(world, e, Velocity).?.v;
+    const steps: usize = @intFromFloat(@ceil((switch_time + cycle(1)) / step_dt));
+    for ([_]u8{ 2, 1, 3 }) |n| {
+        setOutputs(world, n);
+        try expectEqual(n, outputs(world));
+        for (0..steps) |s| {
+            step(world, 1);
+            // No jump: a teleport of even 0.1 in one step would change velocity by ~6.
+            for (stars, &prev) |e, *v| {
+                const now = ecs.get(world, e, Velocity).?.v;
+                try expect(length(now - v.*) < 1);
+                v.* = now;
+            }
+            // Dancing, once the chase has settled, the barycenter holds on the mother's anchor.
+            if (n < output_max and @as(f32, @floatFromInt(s)) * step_dt > switch_time + 1)
+                try expect(length(ecs.get(world, ecs.id(StarField), StarField).?.center) < 5e-3);
+        }
+        for (c.children, 0..) |e, i| {
+            const sc = ecs.get(world, e, Ball).?.scale;
+            if (i < n) try expect(sc > 0) else {
+                try expectEqual(@as(f32, 0), sc);
+                try expect(distance(positionOf(world, e), positionOf(world, c.mother)) < 1e-3);
+            }
+        }
+        try expectApproxEqAbs(mass, starMass(world), 1e-6);
+    }
+    // Back at all outputs: full size, on springs again.
+    for (stars) |e| try expectEqual(@as(f32, 1), ecs.get(world, e, Ball).?.scale);
+}
+
+test "setOutputs clamps to 1…output_max" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    _ = spawnCluster(world, splat(0));
+    setOutputs(world, 0);
+    try expectEqual(@as(u8, 1), outputs(world));
+    setOutputs(world, 9);
+    try expectEqual(output_max, outputs(world));
+}
+
+fn starMass(world: *ecs.world_t) f32 {
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    var total: f32 = 0;
+    for (f.mass[0..f.n]) |m| total += m;
+    return total;
+}
+
+test "planets keep their orbits through output switches" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    for ([_]u8{ 2, 1, 3, 1 }) |n| {
+        setOutputs(world, n);
+        for (0..20 * 60) |_| {
+            step(world, 1);
+            for (sc.ps) |e| try expect(slotOff(world, e) < 0.13);
+        }
+    }
+}
+
+test "breathing turn keeps the stars apart (edge gaps over a cycle)" {
+    const masses = [dancers]f32{ mother_mass, child_mass, child_mass, child_mass };
+    const radius = [dancers]f32{ mother_radius, child_radius, child_radius, child_radius };
+    var mother_child: f32 = std.math.inf(f32);
+    var child_child: f32 = std.math.inf(f32);
+    for (0..360) |s| {
+        const a = dancePose(.breathing_turn, 2, dance_period * @as(f32, @floatFromInt(s)) / 360, splat(0), masses);
+        const gap = struct {
+            fn f(pose: @TypeOf(a), r: [dancers]f32, i: usize, j: usize) f32 {
+                return distance(pose.pos[i], pose.pos[j]) - r[i] * pose.scale[i] - r[j] * pose.scale[j];
+            }
+        }.f;
+        mother_child = @min(mother_child, gap(a, radius, 0, 1), gap(a, radius, 0, 2));
+        child_child = @min(child_child, gap(a, radius, 1, 2));
+    }
+    try expect(mother_child > 0.9); // 1.1 at rest with 3 outputs
+    try expect(child_child > 0.6);
+}
+
+test "one output dances 3× slower: the child laps the mother every 7.2 s" {
+    const masses = [dancers]f32{ mother_mass, child_mass, child_mass, child_mass };
+    const at = struct {
+        fn f(t: f32, m: [dancers]f32) Vec3 {
+            const p = dancePose(.breathing_turn, 1, t, splat(0), m).pos;
+            return p[1] - p[0]; // the child, from the mother
+        }
+    }.f;
+    const lap = dance_period * one_output_slow;
+    try expect(distance(at(0, masses), at(lap, masses)) < 1e-3);
+    try expect(distance(at(0, masses), at(dance_period, masses)) > 1); // not back yet after one 2-output cycle
 }
