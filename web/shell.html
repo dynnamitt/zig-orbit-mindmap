@@ -6,18 +6,17 @@
   <title>zig-orbit-mindmap</title>
   <style>
     /* Colours: tech-trio.svg palette, as in src/main.zig and src/sim.zig. */
-    html, body { margin: 0; height: 100%; background: #0e1414; color: #c8a878;
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1414; color: #c8a878;
                  font: 14px system-ui, sans-serif; }
-    body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; }
-    h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    /* The app sizes the canvas to the whole viewport (raylib's resizable
+       window, main.zig: resize), at any aspect; CSS only pins it in place.
+       touch-action: drags and pinches steer the camera, not the page. */
+    canvas { position: fixed; left: 0; top: 0; display: block; touch-action: none; }
+    /* The title and status float over the scene and never catch input. */
+    h1, #status { position: fixed; margin: 0; pointer-events: none; }
+    h1 { left: 12px; top: 8px; font-size: 20px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
-    /* touch-action: drags and pinches steer the camera, not the page. */
-    /* Fit either orientation: never wider than the viewport, never taller
-       than what the header leaves; width/height auto keep the aspect. */
-    canvas { display: block; touch-action: none; box-sizing: border-box; width: auto; height: auto;
-             max-width: 100vw; max-height: calc(100vh - 80px);
-             max-height: calc(100dvh - 80px); /* the visible height on mobile */
-             border: 2px solid #2e7e7e; image-rendering: auto; }
+    #status { left: 0; right: 0; top: 50%; text-align: center; }
     #status:empty { display: none; }
   </style>
 </head>
@@ -29,9 +28,6 @@
     var started = false;
     var Module = {
       canvas: document.getElementById("canvas"),
-      // Read by the app (main.zig: webPortrait): it flips the canvas to
-      // portrait while the viewport is taller than wide.
-      portrait: 0,
       // Fetch index.wasm with index.js's ?v= tag (web/stamp.sh), so the
       // browser cache can't pair a new index.js with an old index.wasm.
       // (Pages ignores the tag; an index.html cached across a deploy can
@@ -45,15 +41,6 @@
       print: function (text) { console.log(text); },
       printErr: function (text) { console.error(text); },
     };
-    // Portrait when the 450x800 canvas would show larger than the 800x450
-    // one, after the header's ~80px (as in the canvas CSS).
-    function orient() {
-      var w = innerWidth, h = innerHeight - 80;
-      Module.portrait = Math.min(w / 450, h / 800) > Math.min(w / 800, h / 450) ? 1 : 0;
-    }
-    orient();
-    addEventListener("resize", orient);
-    addEventListener("orientationchange", orient);
     // Only startup failures replace the canvas status; later errors just log.
     window.onerror = function () { if (!started) Module.setStatus("failed to start — see the console"); };
   </script>

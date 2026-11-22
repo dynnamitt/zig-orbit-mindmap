@@ -5,12 +5,12 @@ const ecs = @import("zflecs");
 const sim = @import("sim");
 const config = @import("config");
 
-/// Window size, landscape; portrait swaps the two (`--portrait` natively, a
-/// tall viewport on web).
+/// Native starting size, landscape; `--portrait` swaps the two. The window is
+/// resizable, and on web raylib sizes it to the viewport.
 const long_side = 800;
 const short_side = 450;
-/// On web, how often (in frames) to ask the page which way the viewport is.
-const orient_check_frames = 15;
+/// The smallest window (both sides), so the glow textures never reach 0.
+const min_side = 64;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const sand = 0xC8A878FF; // readout text
@@ -164,15 +164,16 @@ var touch: sim.TouchSteer = .{};
 var alpha: f32 = 0;
 var eye: sim.Vec3 = undefined;
 var clock: sim.FixedClock = .{};
-/// Window orientation (see `long_side`).
-var portrait = false;
-var frames: u32 = 0;
+/// The window size the glow textures were made for.
+var glow_size: [2]i32 = undefined;
 var stats: sim.FrameStats = .{};
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    portrait = if (web) webPortrait() else try hasArg(init.args, "--portrait");
-    rl.initWindow(screenSize()[0], screenSize()[1], "zig-orbit-mindmap");
+    const portrait = !web and try hasArg(init.args, "--portrait");
+    rl.setConfigFlags(.{ .window_resizable = true });
+    rl.initWindow(if (portrait) short_side else long_side, if (portrait) long_side else short_side, "zig-orbit-mindmap");
     defer rl.closeWindow();
+    rl.setWindowMinSize(min_side, min_side);
 
     world = ecs.init();
     defer _ = ecs.fini(world);
@@ -196,7 +197,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     thrusters = try sim.ballQuery(world, sim.Thruster);
     defer ecs.query_fini(thrusters);
 
-    glow = try loadGlow(screenSize());
+    glow_size = screenSize();
+    glow = try loadGlow(glow_size);
     defer unloadGlow();
     blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
     defer rl.unloadShader(blur);
@@ -231,11 +233,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
-    // web/shell.html keeps Module.portrait in step with the viewport.
-    if (web) {
-        frames +%= 1;
-        if (frames % orient_check_frames == 0 and webPortrait() != portrait) flip();
-    }
+    if (!std.meta.eql(screenSize(), glow_size)) resize();
     // Fixed steps, never raylib's raw dt: a long frame would otherwise
     // fling planets out of orbit, and dt=0 (first frame) would make
     // flecs measure its own clock.
@@ -298,39 +296,35 @@ fn hasArg(args: std.process.Args, want: []const u8) !bool {
     return false;
 }
 
-/// web/shell.html keeps `Module.portrait` up to date with the viewport.
-fn webPortrait() bool {
-    return std.os.emscripten.emscripten_run_script_int("Module.portrait|0") != 0;
+fn screenSize() [2]i32 {
+    return .{ rl.getScreenWidth(), rl.getScreenHeight() };
 }
 
-fn screenSize() [2]i32 {
-    return if (portrait) .{ short_side, long_side } else .{ long_side, short_side };
+/// Width / height of `size`.
+fn aspectOf(size: [2]i32) f32 {
+    return @as(f32, @floatFromInt(size[0])) / @as(f32, @floatFromInt(size[1]));
 }
 
 /// Width / height of the window.
 fn aspect() f32 {
-    const s = screenSize();
-    return @as(f32, @floatFromInt(s[0])) / @as(f32, @floatFromInt(s[1]));
+    return aspectOf(screenSize());
 }
 
-/// Switch orientation: the window, the glow textures and the camera's zoom.
-/// If the new glow textures can't be made, nothing changes.
-fn flip() void {
-    const from = aspect();
-    portrait = !portrait;
-    const fresh = loadGlow(screenSize()) catch {
-        portrait = !portrait;
-        return;
-    };
+/// Follow a new window size (resized, rotated or a new viewport on web): the
+/// glow textures and the camera's zoom. If the new glow textures can't be
+/// made, the old ones stay (stretched) and the next frame tries again.
+fn resize() void {
+    const size = screenSize();
+    if (size[0] < min_side or size[1] < min_side) return; // minimized
+    const fresh = loadGlow(size) catch return;
     unloadGlow();
     glow = fresh;
-    cam.reframe(from, aspect());
-    rl.setWindowSize(screenSize()[0], screenSize()[1]);
+    cam.reframe(aspectOf(glow_size), aspectOf(size));
+    glow_size = size;
     // A drag in progress spans two layouts: start it afresh.
     touch = .{};
 }
 
-/// Glow textures at the current window size.
 /// Glow textures for a window of `size`; none are left loaded on failure.
 fn loadGlow(size: [2]i32) ![2]rl.RenderTexture2D {
     var out: [2]rl.RenderTexture2D = undefined;
