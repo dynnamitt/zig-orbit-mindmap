@@ -87,7 +87,7 @@ Current scene: `spawnCluster` (a warm-white `Mother` star and three green childr
 - `move` (`OnUpdate`): position from velocity. Velocity changes in `PreUpdate` and `move` after it make semi-implicit Euler, which keeps orbits and springs bounded; keep that phase order if you add systems.
 - `barycenter` (`PostUpdate`, run system): publishes `StarField` (every star's position and mass, the barycenter and its drift) and the `Position` of the entity `ecs.id(Barycenter)`. `spawnCluster` seeds both. main interpolates that entity like a ball and points the camera at it.
 
-Tuning constants and their reasons are at the top of `sim.zig`. Colours: star and planet colours in `sim.zig` (planets use tech-trio.svg shades), render-only ones in `main.zig` and `web/shell.html`. Worker threads (`-Dthreads`) only pay off with far more planets than the scene has, so they are off by default and rejected for web (wasm threads need COOP/COEP headers, which Pages can't send).
+Tuning constants and their reasons are at the top of `sim.zig`. Colours: star and planet colours in `sim.zig` (planets use tech-trio palette shades: teal, orange, sand, light gray), render-only ones in `main.zig` and `web/shell.html`. Worker threads (`-Dthreads`) only pay off with far more planets than the scene has, so they are off by default and rejected for web (wasm threads need COOP/COEP headers, which Pages can't send).
 
 ### Web build (`addWebBuild` in build.zig)
 

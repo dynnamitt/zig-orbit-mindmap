@@ -5,7 +5,7 @@ const ecs = @import("zflecs");
 
 // Star colours: the mother is the brightest (warm white), her children green.
 const mother_white: u32 = 0xFFF1D6FF;
-const child_green: u32 = 0x3DDC84FF; // phosphor green, as on an old terminal
+const child_green: u32 = 0x52D97FFF; // phosphor green, with enough red that the glow washes its core white
 
 // Star cluster (world units; masses only matter relative to each other). The
 // mother is slightly smaller than her children but heavier, and is held home
@@ -66,7 +66,7 @@ const planet_tilt = 0.06;
 const planet_tilt_axis: Vec3 = .{ 1, 0, 0 };
 // The sample IPO: this project's own build. The mother is `zig build` (the
 // process, unlabelled); the planets are its inputs and her children its
-// outputs. Planet colours: the tech-trio.svg palette (teal, orange, sand,
+// outputs. Planet colours: the tech-trio palette (teal, orange, sand,
 // light gray) with lighter, darker and nearby shades. Cycled past the table
 // (tests spawn more).
 const PlanetData = struct { name: [:0]const u8, rgba: u32 };
