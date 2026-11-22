@@ -535,6 +535,8 @@ pub const OrbitCam = struct {
     /// Height angle, radians; positive looks down from above.
     pitch: f32 = 0.5,
     distance: f32,
+    /// The default framing's `distance`, which `zoomFactor` measures against.
+    home_distance: f32,
     /// Zoom limits for `distance`.
     min_distance: f32,
     max_distance: f32,
@@ -560,9 +562,11 @@ pub const OrbitCam = struct {
     /// a screen `aspect` (width / height) wide, and zooms from close to the
     /// center to far away.
     pub fn framing(target: Vec3, radius: f32, aspect: f32) OrbitCam {
+        const d = fitDistance(radius, aspect);
         return .{
             .target = target,
-            .distance = fitDistance(radius, aspect),
+            .distance = d,
+            .home_distance = d,
             .min_distance = radius * frame_min,
             .max_distance = radius * frame_max,
         };
@@ -581,6 +585,7 @@ pub const OrbitCam = struct {
         const k = fitDistance(1, to) / fitDistance(1, from);
         // The limits scale too, so flipping back restores the same zoom.
         self.distance *= k;
+        self.home_distance *= k;
         self.min_distance *= k;
         self.max_distance *= k;
     }
@@ -592,6 +597,12 @@ pub const OrbitCam = struct {
         // In f32, @mod of a tiny negative rounds up to tau itself.
         if (self.yaw >= std.math.tau) self.yaw = 0;
         self.pitch = std.math.clamp(self.pitch + dy * drag_speed, -max_pitch, max_pitch);
+    }
+
+    /// How far zoomed in from the default framing.
+    /// @returns {f32} 1 at the default framing, 2 at half its distance.
+    pub fn zoomFactor(self: OrbitCam) f32 {
+        return self.home_distance / self.distance;
     }
 
     /// `notches` of mouse wheel; positive zooms in.
@@ -928,6 +939,17 @@ test "OrbitCam: eye sits `distance` from the target, above it for positive pitch
     var level = OrbitCam.framing(.{ 0, 0, 0 }, 1, 800.0 / 450.0);
     level.pitch = 0;
     try expect(distance(level.eye(), .{ 0, 0, level.distance }) < 1e-4);
+}
+
+test "OrbitCam: zoomFactor is 1 at the default framing and grows zooming in" {
+    const a = 800.0 / 450.0;
+    var cam = OrbitCam.framing(.{ 0, 0, 0 }, 5, a);
+    try expectEqual(@as(f32, 1), cam.zoomFactor());
+    cam.distance /= 2;
+    try expectApproxEqAbs(@as(f32, 2), cam.zoomFactor(), 1e-5);
+    // A flip to portrait keeps the zoom.
+    cam.reframe(a, 450.0 / 800.0);
+    try expectApproxEqAbs(@as(f32, 2), cam.zoomFactor(), 1e-5);
 }
 
 test "OrbitCam: drag clamps pitch short of the poles and wraps yaw" {
