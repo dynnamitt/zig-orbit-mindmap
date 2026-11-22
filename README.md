@@ -25,6 +25,8 @@ zig build run -- --portrait  # start in a portrait window
 zig build -Dtarget=wasm32-emscripten -Doptimize=ReleaseSmall   # browser build → zig-out/web/
 ```
 
+Note to self on perf: [Zig vs Rust wasm size](zig_vs.md).
+
 ## Updating deps
 
 ```sh
