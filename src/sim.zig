@@ -19,6 +19,12 @@ const child_mass = 0.5;
 /// Cord rest length, mother center to child center.
 const cord_rest = 2.2;
 const cord_k = 1.2;
+/// Cord thickness at rest length, and how fast it changes with stretch:
+/// radius ∝ (rest / len)^cord_bulge, within [min, max] × the rest radius.
+const cord_radius = 0.125;
+const cord_bulge = 3.0;
+const cord_bulge_min = 0.4;
+const cord_bulge_max = 3.0;
 const home_k = 0.8;
 /// Pair push: `repel / (r² + repel_soft)`, soft so close passes stay gentle.
 const repel = 0.4;
@@ -121,7 +127,18 @@ pub const Star = struct { mass: f32 };
 /// Relationship `(Cord, mother)`: a spring of `rest` length between this star
 /// and `mother` (also a `Star`). It pulls when stretched, pushes when squeezed.
 /// At most one per star (safe builds check both rules).
-pub const Cord = struct { rest: f32 };
+pub const Cord = struct {
+    rest: f32,
+
+    /// Radius to draw the cord at its current `len`: like an elastic band it
+    /// thickens fast when squeezed and thins when stretched, as
+    /// (rest / len)^cord_bulge, clamped.
+    pub fn radius(self: Cord, len: f32) f32 {
+        if (!(len > 0)) return cord_radius * cord_bulge_max;
+        const k = std.math.pow(f32, self.rest / len, cord_bulge);
+        return cord_radius * std.math.clamp(k, cord_bulge_min, cord_bulge_max);
+    }
+};
 /// A weak spring holds the star near `v` (the mother's anchor).
 pub const Home = struct { v: Vec3 };
 /// Tag on the entity `ecs.id(Barycenter)` (a singleton): its `Position` is the
@@ -641,30 +658,17 @@ pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
     });
 }
 
-/// Query over every mother star: term 0 = `Position`, term 1 = optional
-/// `PrevPosition`, term 2 = `Ball`. Caller owns it (`ecs.query_fini`).
-pub fn motherQuery(world: *ecs.world_t) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.id(Ball) },
-            .{ .id = ecs.id(Mother) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 4),
-    });
-}
-
-/// Query over every drawable entity: term 0 = `Position`, term 1 = optional
-/// `PrevPosition` (null field for static entities), term 2 = `Ball`.
-/// Caller owns it (`ecs.query_fini`).
-pub fn ballQuery(world: *ecs.world_t) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.id(Ball) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
-    });
+/// Query over every drawable entity, or only those with `Tag` (`Star`,
+/// `Mother`): term 0 = `Position`, term 1 = optional `PrevPosition` (null
+/// field for static entities), term 2 = `Ball`. Caller owns it
+/// (`ecs.query_fini`).
+pub fn ballQuery(world: *ecs.world_t, comptime Tag: ?type) !*ecs.query_t {
+    var desc: ecs.query_desc_t = .{};
+    desc.terms[0] = .{ .id = ecs.id(Position) };
+    desc.terms[1] = .{ .id = ecs.id(PrevPosition), .oper = .Optional };
+    desc.terms[2] = .{ .id = ecs.id(Ball) };
+    if (Tag) |T| desc.terms[3] = .{ .id = ecs.id(T) };
+    return ecs.query_init(world, &desc);
 }
 
 // ---------------------------------------------------------------- tests
@@ -978,7 +982,7 @@ test "ballQuery yields every star and planet, all moving" {
     const c = spawnCluster(world, .{ 0, 0, 0 });
     _ = spawnPlanets(world, c.mother);
 
-    const q = try ballQuery(world);
+    const q = try ballQuery(world, null);
     defer ecs.query_fini(q);
     var n: usize = 0;
     var with_prev: usize = 0;
@@ -1033,7 +1037,7 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     register(world);
     const c = spawnCluster(world, .{ 0, 0, 0 });
     const ps = spawnPlanets(world, c.mother);
-    const mq = try motherQuery(world);
+    const mq = try ballQuery(world, Mother);
     defer ecs.query_fini(mq);
     var mothers: usize = 0;
     var mother_ok = true;
@@ -1044,6 +1048,14 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     }
     try expect(mother_ok);
     try expectEqual(@as(usize, 1), mothers);
+
+    // Stars (what glows): the mother and her children, no planets.
+    const sq = try ballQuery(world, Star);
+    defer ecs.query_fini(sq);
+    var stars: usize = 0;
+    var sit = ecs.query_iter(world, sq);
+    while (ecs.query_next(&sit)) stars += sit.count();
+    try expectEqual(1 + c.children.len, stars);
 
     const cords = try linkQuery(world, Cord);
     defer ecs.query_fini(cords);
@@ -1089,4 +1101,13 @@ test "TouchSteer: pinch only within the same pair of fingers" {
     // Down to one finger: it waits a frame before dragging.
     try expectEqual(Gesture.none, t.update(&.{a}, false, .{ 0, 0 }));
     try expectEqual(Gesture{ .drag = .{ 0, 0 } }, t.update(&.{a}, false, .{ 0, 0 }));
+}
+
+test "Cord.radius: thicker when squeezed, thinner when stretched, clamped" {
+    const c: Cord = .{ .rest = 2 };
+    try expectApproxEqAbs(@as(f32, cord_radius), c.radius(2), 1e-6);
+    try expectEqual(@as(f32, cord_radius * cord_bulge_max), c.radius(1)); // (2/1)^3 = 8, clamped
+    try expectApproxEqAbs(@as(f32, cord_radius / 1.728), c.radius(2.4), 1e-5); // (2/2.4)^3
+    try expectEqual(@as(f32, cord_radius * cord_bulge_min), c.radius(100));
+    try expectEqual(@as(f32, cord_radius * cord_bulge_max), c.radius(0));
 }
