@@ -104,6 +104,8 @@ const thrust_off = 0.02;
 const thrust_k = 2.0; // per s², toward the slot's position
 const thrust_damp = 2.8; // per s, toward the slot's velocity (~critical for k)
 const thrust_max = 1.6;
+/// Per second: how fast an idle nozzle swivels toward the push it would give.
+const thrust_aim = 4.0;
 
 /// How far the planets reach from the barycenter, for framing.
 pub const system_radius = planet_ring_r + (if (planet_count > planet_ring_max) planet_ring_bump else 0) + planet_radius;
@@ -195,8 +197,8 @@ pub const Planet = struct {};
 /// ring's speed `omega` (rad/s), so the slots keep the even spacing.
 pub const Slot = struct { r: f32, phase: f32, omega: f32 };
 /// A planet's thruster: `on` while it steers back to its slot, pushing along
-/// `dir` (unit; while idle, the way its slot moves); `time` counts how long it
-/// has been firing.
+/// `dir` (unit; while idle, it swivels toward the push it would give);
+/// `time` counts how long it has been firing.
 pub const Thruster = struct { on: bool = false, dir: Vec3 = .{ 0, 1, 0 }, time: f32 = 0 };
 /// A name to show next to a body (planets and child stars).
 pub const Label = struct { text: [:0]const u8 };
@@ -413,15 +415,19 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
         const target_v = f.drift + ahead * splat(slot.omega * slot.r);
         const off = length(target - p.v) / slot.r;
         if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
-        if (!t.on) {
-            // Idle, the nozzle trails the planet round its ring.
-            t.dir = ahead;
-            t.time = 0;
-            continue;
-        }
         var a = (target - p.v) * splat(thrust_k) + (target_v - v.v) * splat(thrust_damp);
         const n = length(a);
         if (n > thrust_max) a *= splat(thrust_max / n);
+        if (!t.on) {
+            // Idle, the nozzle eases toward the push it would give, so it is
+            // already aimed when it fires (no snap at ignition).
+            if (n > 0) {
+                const eased = std.math.lerp(t.dir, a / splat(n), splat(1 - @exp(-thrust_aim * dt)));
+                if (length(eased) > 0) t.dir = normalize(eased);
+            }
+            t.time = 0;
+            continue;
+        }
         if (n > 0) t.dir = a / splat(@min(n, thrust_max));
         v.v += a * splat(dt);
         t.time += dt;
@@ -1409,6 +1415,21 @@ test "thrusters: a displaced planet fires until it is back on its slot" {
         step(world, 1);
     }
     try expect(slotOff(world, p) < thrust_off + 0.01);
+}
+
+test "thrusters: an idle nozzle swivels toward the push it would give" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    const p = sc.ps[0];
+    const b = positionOf(world, ecs.id(Barycenter));
+    set(world, p, Position, .{ .v = b + (positionOf(world, p) - b) * splat(1.05) }); // 5% out: below thrust_on
+    step(world, 30);
+    const t = ecs.get(world, p, Thruster).?;
+    try expect(!t.on);
+    try expect(dot(t.dir, positionOf(world, p) - b) < 0); // aimed back in
+    try expectApproxEqAbs(@as(f32, 1), length(t.dir), 1e-4);
 }
 
 test "thrusters: every planet stays near its slot (and the even spacing) for two minutes" {

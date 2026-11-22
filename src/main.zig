@@ -36,10 +36,12 @@ const nozzle_idle = 0x2A2E2EFF; // dark, like a hole
 const flame = 0xFF9A3CFF; // orange
 const flame_hot = 0xFFF2C8FF; // near white, at the pulse peak
 const nozzle_size = 0.35; // disc radius / planet radius
-const beam_length = 2.4; // / planet radius, at mid pulse
+const beam_length = 2.0; // / planet radius, at mid pulse
 const beam_pulse = 0.35; // ± fraction of the length
 const beam_pulse_hz = 5.0;
 const beam_sides = 10;
+/// The flame's colorBrightness in the glow pass: a slightly softer aura.
+const flame_glow = -0.25;
 
 // Labels: screen-space text beside each named body, drawn after bloom.
 const label_color = 0xE0D8C8FF; // pale sand
@@ -539,19 +541,19 @@ fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 fn drawThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
     const r = ecs.field(it, sim.Ball, 2).?[i].radius;
-    if (t.on) drawFlame(at, -t.dir, r, t.time) else drawNozzle(at, -t.dir, r, rl.getColor(nozzle_idle));
+    if (t.on) drawFlame(at, -t.dir, r, flameColor(t.time), t.time) else drawNozzle(at, -t.dir, r, rl.getColor(nozzle_idle));
 }
 
 /// The glow pass's share: only a firing thruster glows.
 fn drawFiringThruster(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const t = ecs.field(it, sim.Thruster, 3).?[i];
-    if (t.on) drawFlame(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, t.time);
+    if (t.on) drawFlame(at, -t.dir, ecs.field(it, sim.Ball, 2).?[i].radius, rl.colorBrightness(flameColor(t.time), flame_glow), t.time);
 }
 
-/// A firing thruster: the nozzle in flame colour and its beam.
-fn drawFlame(at: sim.Vec3, back: sim.Vec3, r: f32, time: f32) void {
-    drawNozzle(at, back, r, flameColor(time));
-    drawBeam(at, back, r, time);
+/// A firing thruster: the nozzle and its beam, in `color`.
+fn drawFlame(at: sim.Vec3, back: sim.Vec3, r: f32, color: rl.Color, time: f32) void {
+    drawNozzle(at, back, r, color);
+    drawBeam(at, back, r, color, time);
 }
 
 /// A thin disc just proud of the surface, on the side `back` points to.
@@ -561,13 +563,13 @@ fn drawNozzle(at: sim.Vec3, back: sim.Vec3, r: f32, color: rl.Color) void {
     rl.drawCylinderEx(vec3(disc_in), vec3(disc_out), r * nozzle_size, r * nozzle_size, beam_sides, color);
 }
 
-/// The exhaust: a cone out of the nozzle along `back`, its length and colour
-/// pulsing with the firing `time`.
-fn drawBeam(at: sim.Vec3, back: sim.Vec3, r: f32, time: f32) void {
+/// The exhaust: a cone out of the nozzle along `back`, its length pulsing
+/// with the firing `time`.
+fn drawBeam(at: sim.Vec3, back: sim.Vec3, r: f32, color: rl.Color, time: f32) void {
     const pulse = @sin(time * beam_pulse_hz * std.math.tau);
     const start = at + back * sim.splat(r);
     const end = start + back * sim.splat(r * beam_length * (1 + beam_pulse * pulse));
-    rl.drawCylinderEx(vec3(start), vec3(end), r * nozzle_size, r * 0.05, beam_sides, flameColor(time));
+    rl.drawCylinderEx(vec3(start), vec3(end), r * nozzle_size, r * 0.05, beam_sides, color);
 }
 
 /// Orange to near white and back, with the beam's pulse.
