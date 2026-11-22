@@ -42,10 +42,10 @@ const children = [_]ChildData{
 pub const max_stars = 16;
 
 // Planets (the IPO's inputs): every star pulls each one with g·mass/r²,
-// softened so a close pass stays finite. g is a quarter of the first
-// layout's 55, so the planets go round at half that speed (#35); the
-// cluster's springs don't use it. The cluster is lumpy and wobbles, which
-// would make the orbits wander; the thrusters (below) hold them.
+// softened so a close pass stays finite. g sets the pace: the inner ring
+// takes ~29 s a lap; the cluster's springs don't use it. The cluster is lumpy
+// and wobbles, which would make the orbits wander; the thrusters (below) hold
+// them.
 const g = 13.75;
 const planet_soft = 0.3;
 // Layout (`planetSlot`): every planet the same size, on Kepler ellipses
@@ -55,11 +55,13 @@ const planet_soft = 0.3;
 // real ones do. Past `planet_ring_max` planets the odd ones (0-based) move
 // out to a ring `planet_ring_bump` larger, its long axis turned
 // `planet_ring_turn`; the two never cross (closest ~1.2 apart, over two
-// planet radii; at e 0.15 and bump 2.5 it was 0.3).
+// planet radii).
 const planet_ring_r = 9.0; // semi-major axis of ring 0
 const planet_ring_bump = 3.5;
 const planet_ecc = 0.15;
 const planet_ring_turn = std.math.pi / 2.0;
+/// Newton rounds for Kepler's equation: f32 precision for e up to ~0.5.
+const kepler_rounds = 4;
 const planet_ring_max = 8;
 const planet_radius = 0.48;
 const planet_tilt = 0.06;
@@ -97,10 +99,9 @@ pub const planet_rings: u2 = if (planet_count > planet_ring_max) 2 else 1;
 // toward the slot's position and velocity, capped at `thrust_max`; gravity
 // keeps acting throughout. Between firings `settle` damps the planet's
 // radial speed toward its slot's (a quiet stand-in for the thrusters that
-// keeps the cluster's wobble from building up). The constants are the circle
-// layout's scaled to a quarter of the gravity: accelerations ÷ 4, rates ÷ 2.
-// A 10-minute probe with 12 planets: within 0.10 semi-major axes of their
-// slots, thrusting ~30% of the time (the circles: 0.10, ~1/3).
+// keeps the cluster's wobble from building up). A 10-minute probe with 12
+// planets: within 0.10 semi-major axes of their slots, thrusting ~30% of the
+// time.
 const thrust_on = 0.08;
 const thrust_off = 0.02;
 const thrust_k = 0.5; // per s², toward the slot's position
@@ -114,7 +115,7 @@ const thrust_aim = 4.0;
 const thrust_aim_min = 0.05;
 
 /// How far the planets reach from the barycenter (the outer ring's far end), for framing.
-pub const system_radius = ringOrbit(planet_rings - 1).a * (1 + planet_ecc) + planet_radius;
+pub const system_radius = ring_orbits[planet_rings - 1].a * (1 + planet_ecc) + planet_radius;
 
 /// How long `FrameStats` collects (seconds) before it updates its readout.
 const stats_window = 0.5;
@@ -199,7 +200,7 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
-/// Where a planet belongs: on ring `ring`'s ellipse (`ringOrbit`) at mean
+/// Where a planet belongs: on ring `ring`'s ellipse (`ring_orbits`) at mean
 /// anomaly `phase`, which turns at the ring's mean motion `omega` (rad/s), so
 /// the slots keep their spacing in time.
 pub const Slot = struct { ring: u1, phase: f32, omega: f32 };
@@ -409,7 +410,7 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
     for (positions, velocities, slots, thrusters) |p, *v, *slot, *t| {
         // Compare with the slot where it is now, then move the slot on.
         defer slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
-        const o = ringOrbit(slot.ring);
+        const o = ring_orbits[slot.ring];
         const ecc_anomaly = eccentricAnomaly(slot.phase, o.e);
         const target = f.center + o.at(ecc_anomaly);
         const target_v = f.drift + o.velocity(ecc_anomaly, slot.omega);
@@ -420,8 +421,9 @@ fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, 
         const push = if (n > thrust_aim_min) a / splat(n) else t.dir;
         if (!t.on) {
             // Settle: radial only, so it keeps the orbit's angular momentum.
-            const out = normalize(p.v - f.center);
-            v.v -= out * splat(settle * dot(v.v - target_v, out) * dt);
+            const out = p.v - f.center;
+            const r2 = dot(out, out);
+            if (r2 > 0) v.v -= out * splat(settle * dot(v.v - target_v, out) / r2 * dt);
             // Idle, the nozzle eases toward the push it would give, so it is
             // already (nearly) aimed when it fires: no visible snap.
             t.dir = normalize(std.math.lerp(t.dir, push, splat(aim)));
@@ -754,30 +756,51 @@ pub const Orbit = struct {
     peri: Vec3,
     side: Vec3,
 
-    /// Semi-minor axis.
+    /// The semi-minor axis.
+    /// @param o Orbit the ring
+    /// @returns f32 its semi-minor axis, world units
     pub fn b(o: Orbit) f32 {
         return o.a * @sqrt(1 - o.e * o.e);
     }
 
-    /// The ellipse's center, from the focus.
+    /// The ellipse's center.
+    /// @param o Orbit the ring
+    /// @returns Vec3 the center, from the focus
     pub fn center(o: Orbit) Vec3 {
         return o.peri * splat(-o.a * o.e);
     }
 
-    /// The point at eccentric anomaly `ecc_anomaly`, from the focus.
+    /// A point on the ellipse.
+    /// @param o Orbit the ring
+    /// @param ecc_anomaly f32 its eccentric anomaly, radians
+    /// @returns Vec3 the point, from the focus
     pub fn at(o: Orbit, ecc_anomaly: f32) Vec3 {
         return o.center() + o.peri * splat(o.a * @cos(ecc_anomaly)) + o.side * splat(o.b() * @sin(ecc_anomaly));
     }
 
-    /// The velocity there, for mean motion `omega` (rad/s).
+    /// A point on the ellipse by time: `at`, after solving Kepler's equation.
+    /// @param o Orbit the ring
+    /// @param mean_anomaly f32 its mean anomaly, radians
+    /// @returns Vec3 the point, from the focus
+    pub fn atMean(o: Orbit, mean_anomaly: f32) Vec3 {
+        return o.at(eccentricAnomaly(mean_anomaly, o.e));
+    }
+
+    /// The velocity of a body on the ellipse.
+    /// @param o Orbit the ring
+    /// @param ecc_anomaly f32 where it is, as eccentric anomaly (radians)
+    /// @param omega f32 the ring's mean motion, rad/s
+    /// @returns Vec3 the velocity, relative to the focus
     pub fn velocity(o: Orbit, ecc_anomaly: f32, omega: f32) Vec3 {
         const rate = omega / (1 - o.e * @cos(ecc_anomaly)); // dE/dt
         return (o.peri * splat(-o.a * @sin(ecc_anomaly)) + o.side * splat(o.b() * @cos(ecc_anomaly))) * splat(rate);
     }
 };
 
-/// Planet ring 0 (default) or 1 (bumped: larger and turned).
-pub fn ringOrbit(ring: u1) Orbit {
+/// Planet ring 0 (default) and 1 (bumped: larger and turned), built once.
+pub const ring_orbits = [2]Orbit{ ringOrbit(0), ringOrbit(1) };
+
+fn ringOrbit(ring: u1) Orbit {
     const k: f32 = @floatFromInt(ring);
     return .{
         .a = planet_ring_r + k * planet_ring_bump,
@@ -793,8 +816,7 @@ pub fn ringOrbit(ring: u1) Orbit {
 /// @returns f32 E, radians
 pub fn eccentricAnomaly(mean_anomaly: f32, e: f32) f32 {
     var ecc = mean_anomaly + e * @sin(mean_anomaly);
-    // Newton's method; four rounds reach f32 precision for e up to ~0.5.
-    for (0..4) |_| ecc -= (ecc - e * @sin(ecc) - mean_anomaly) / (1 - e * @cos(ecc));
+    for (0..kepler_rounds) |_| ecc -= (ecc - e * @sin(ecc) - mean_anomaly) / (1 - e * @cos(ecc));
     return ecc;
 }
 
@@ -814,10 +836,10 @@ const ring_normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
 /// solve for the nearest point if rings get much more eccentric.
 /// @param p Vec3 the point
 /// @param focus Vec3 the ring's focus (the barycenter)
-/// @param ring u1 which ring (see `ringOrbit`)
+/// @param ring u1 which ring (see `ring_orbits`)
 /// @returns f32 the distance, in world units
 pub fn ringGap(p: Vec3, focus: Vec3, ring: u1) f32 {
-    const o = ringOrbit(ring);
+    const o = ring_orbits[ring];
     const d = p - focus;
     const h = dot(d, ring_normal);
     const flat = d - ring_normal * splat(h);
@@ -838,14 +860,14 @@ pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize
     var on_ring = [2]f32{ 0, 0 };
     for (0..n) |i| {
         const slot = planetSlot(i, n);
-        const d = ringOrbit(slot.ring).at(eccentricAnomaly(slot.phase, planet_ecc));
+        const d = ring_orbits[slot.ring].atMean(slot.phase);
         mu[slot.ring] += -dot(fieldPull(f, f.center + d), normalize(d)) * dot(d, d);
         on_ring[slot.ring] += 1;
     }
     var out: [n]ecs.entity_t = undefined;
     for (&out, 0..) |*e, i| {
         const slot = planetSlot(i, n);
-        const o = ringOrbit(slot.ring);
+        const o = ring_orbits[slot.ring];
         const ecc_anomaly = eccentricAnomaly(slot.phase, o.e);
         // Kepler's third law: ω² a³ = μ. Plus the barycenter's own drift, so
         // the orbit is around it.
@@ -1125,7 +1147,7 @@ test "planets stay near their orbits and planes for two minutes" {
             // semi-major axis from its slot (see the slot test), so near its
             // ring and plane.
             const ring = planetSlot(i, planet_count).ring;
-            const a = ringOrbit(ring).a;
+            const a = ring_orbits[ring].a;
             try expect(ringGap(positionOf(world, e), b, ring) / a < 0.12);
             try expect(@abs(dot(positionOf(world, e) - b, ring_normal)) / a < 0.13);
         }
@@ -1170,10 +1192,10 @@ test "planets: Kepler ellipses (one ring, or a bumped one for odd planets past t
             try expectEqual(@as(u1, @intFromBool(n > planet_ring_max and i % 2 == 1)), slot.ring);
             // The same mean anomaly apart.
             try expectApproxEqAbs(std.math.tau * @as(f32, @floatFromInt(i)) / n, slot.phase, 1e-5);
-            const o = ringOrbit(slot.ring);
+            const o = ring_orbits[slot.ring];
             const d = positionOf(world, e) - f.center;
             const v = ecs.get(world, e, Velocity).?.v - f.drift;
-            try expect(distance(d, o.at(eccentricAnomaly(slot.phase, o.e))) < 1e-3);
+            try expect(distance(d, o.atMean(slot.phase)) < 1e-3);
             try expect(distance(normalize(cross(d, v)), ring_normal) < 1e-4); // on the plane
             // One period per ring, and vis-viva speed for it: v² = μ(2/r - 1/a), μ = ω²a³.
             if (omega[slot.ring]) |w0| try expectApproxEqAbs(w0, slot.omega, 1e-6) else omega[slot.ring] = slot.omega;
@@ -1188,19 +1210,19 @@ test "planets: Kepler ellipses (one ring, or a bumped one for odd planets past t
         }
         // That period is Kepler's for the ring's mean pull: ω²a³ = μ.
         for (0..2) |ring| if (omega[ring]) |w| {
-            const a = ringOrbit(@intCast(ring)).a;
+            const a = ring_orbits[ring].a;
             try expectApproxEqAbs(mu[ring] / on_ring[ring], w * w * a * a * a, 1e-2);
         };
     }
 }
 
-test "planets: half the first layout's speed, inner lap ~29 s" {
+test "planets: the inner ring takes ~29 s a lap" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
     const sc = spawnScene(world, planet_count);
     const lap = std.math.tau / ecs.get(world, sc.ps[0], Slot).?.omega;
-    try expect(lap > 27 and lap < 31); // a circle of radius 9 at g = 55 took ~14.5 s
+    try expect(lap > 27 and lap < 31);
 }
 
 test "eccentricAnomaly solves Kepler's equation" {
@@ -1214,13 +1236,17 @@ test "eccentricAnomaly solves Kepler's equation" {
 }
 
 test "the two rings stay over two planet radii apart" {
-    for (0..360) |k| {
-        const p = ringOrbit(0).at(std.math.tau * @as(f32, @floatFromInt(k)) / 360);
-        try expect(ringGap(p, splat(0), 1) > 2 * planet_radius);
+    // The true nearest distance, by sampling both ellipses.
+    const samples = 360;
+    var nearest: f32 = std.math.inf(f32);
+    for (0..samples) |i| {
+        const p = ring_orbits[0].at(std.math.tau * @as(f32, @floatFromInt(i)) / samples);
+        for (0..samples) |j| nearest = @min(nearest, distance(p, ring_orbits[1].at(std.math.tau * @as(f32, @floatFromInt(j)) / samples)));
     }
+    try expect(nearest > 2 * planet_radius);
 }
 
-test "a planet spawned mid-wobble starts circular around the drifting barycenter" {
+test "a planet spawned mid-wobble starts with no radial motion relative to the drifting barycenter" {
     const world = ecs.init();
     defer _ = ecs.fini(world);
     register(world);
@@ -1259,7 +1285,7 @@ test "orbits survive a 3 s frame stall" {
         const b = positionOf(world, ecs.id(Barycenter));
         for (sc.ps, 0..) |e, i| {
             const ring = planetSlot(i, planet_count).ring;
-            try expect(ringGap(positionOf(world, e), b, ring) / ringOrbit(ring).a < 0.1);
+            try expect(ringGap(positionOf(world, e), b, ring) / ring_orbits[ring].a < 0.1);
         }
     }
 }
@@ -1455,9 +1481,8 @@ test "labels: every planet and child star, never the mother" {
     try expectEqual(planet_count + children.len, n);
 }
 
-test "ringOrbit: the barycenter at a focus, ring 1 larger and turned" {
-    for (0..2) |ring| {
-        const o = ringOrbit(@intCast(ring));
+test "ring_orbits: the barycenter at a focus, ring 1 larger and turned" {
+    for (ring_orbits) |o| {
         // Near and far ends: a(1 ∓ e) from the focus.
         try expectApproxEqAbs(o.a * (1 - o.e), length(o.at(0)), 1e-4);
         try expectApproxEqAbs(o.a * (1 + o.e), length(o.at(std.math.pi)), 1e-4);
@@ -1465,7 +1490,7 @@ test "ringOrbit: the barycenter at a focus, ring 1 larger and turned" {
         const p = o.at(1.1);
         try expectApproxEqAbs(2 * o.a, length(p) + distance(p, o.center() * splat(2)), 1e-4);
     }
-    try expectApproxEqAbs(@as(f32, 0), dot(ringOrbit(0).peri, ringOrbit(1).peri), 1e-6); // turned 90°
+    try expectApproxEqAbs(@as(f32, 0), dot(ring_orbits[0].peri, ring_orbits[1].peri), 1e-6); // turned 90°
     try expectEqual(@as(u2, 2), planet_rings); // 12 planets: two rings
 }
 
@@ -1473,13 +1498,13 @@ test "ringOrbit: the barycenter at a focus, ring 1 larger and turned" {
 fn slotOff(world: *ecs.world_t, e: ecs.entity_t) f32 {
     const f = ecs.get(world, ecs.id(StarField), StarField).?;
     const s = ecs.get(world, e, Slot).?;
-    const o = ringOrbit(s.ring);
-    return distance(positionOf(world, e), f.center + o.at(eccentricAnomaly(s.phase, o.e))) / o.a;
+    const o = ring_orbits[s.ring];
+    return distance(positionOf(world, e), f.center + o.atMean(s.phase)) / o.a;
 }
 
 test "ringGap: distance to the ring's ellipse, in and out of its plane" {
     const c: Vec3 = .{ 1, 2, 3 };
-    const o = ringOrbit(1);
+    const o = ring_orbits[1];
     for ([_]f32{ 0, 0.7, 2, std.math.pi, 4 }) |ecc| {
         const p = o.at(ecc);
         const out = normalize(p);

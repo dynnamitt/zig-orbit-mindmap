@@ -23,8 +23,7 @@ const ring_colors = [2]u32{ 0xFFB000FF, 0x3FC8D0FF };
 // Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
 // planet links are faded tube dashes from the planet to the mother's ring:
 // thinner and a little brighter while the planet is off its ring (not touching),
-// and each dash lit by the cluster (#35): brighter the nearer it is to the
-// barycenter, alpha × (floor + (1 - floor) / (1 + (d / d0)²)).
+// and each dash lit by the cluster: brighter the nearer it is to the barycenter.
 const cord_sides = 8;
 const dash_len = 0.3;
 const dash_gap = 0.25;
@@ -526,7 +525,7 @@ fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 /// ellipses in their theme colours, the current barycenter at a focus.
 fn drawStartRings() void {
     for (0..sim.planet_rings) |ring| {
-        const o = sim.ringOrbit(@intCast(ring));
+        const o = sim.ring_orbits[ring];
         const color = rl.colorAlpha(rl.getColor(ring_colors[ring]), start_ring_alpha);
         drawCircle(cam.target + o.center(), o.peri * sim.splat(o.a), o.side * sim.splat(o.b()), start_ring_segments, 2, start_ring_width, color);
     }
