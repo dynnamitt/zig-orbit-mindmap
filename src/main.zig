@@ -25,6 +25,13 @@ const dash_gap = 0.25;
 /// The mother's ring: radius as a multiple of hers, leaving room for her glow.
 const ring_scale = 2.2;
 const ring_segments = 48;
+/// The planets' starting rings: thin, faded dots (every other segment).
+const start_ring_gray = 0x66666670;
+const start_ring_segments = 160;
+// Labels: screen-space text beside each named body, drawn after bloom.
+const label_color = 0xE0D8C8FF; // pale sand
+const label_font_size = 16;
+const label_gap = 4; // pixels from the sphere's edge
 
 // Bloom: stars and cords are also drawn into a smaller glow texture, which is
 // blurred and added on top of the scene. Planets go into it in black (so they
@@ -99,6 +106,9 @@ var cords: *ecs.query_t = undefined;
 var inputs: *ecs.query_t = undefined;
 var mothers: *ecs.query_t = undefined;
 var stars: *ecs.query_t = undefined;
+var labels: *ecs.query_t = undefined;
+/// This frame's camera, for the label callback.
+var frame_camera: rl.Camera3D = undefined;
 /// Glow textures: the stars drawn into [0], then blurred back and forth.
 var glow: [2]rl.RenderTexture2D = undefined;
 var blur: rl.Shader = undefined;
@@ -136,6 +146,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer ecs.query_fini(mothers);
     stars = try sim.ballQuery(world, sim.Star);
     defer ecs.query_fini(stars);
+    labels = try sim.ballQuery(world, sim.Label);
+    defer ecs.query_fini(labels);
 
     glow = try loadGlow(screenSize());
     defer unloadGlow();
@@ -173,19 +185,20 @@ fn frame() callconv(.c) void {
     cam.target = drawnOf(ecs.id(sim.Barycenter));
     eye = cam.eye();
 
-    const camera: rl.Camera3D = .{
+    frame_camera = .{
         .position = vec3(eye),
         .target = vec3(cam.target),
         .up = .{ .x = 0, .y = 1, .z = 0 },
         .fovy = sim.OrbitCam.fovyFor(aspect()),
         .projection = .perspective,
     };
-    glowPass(camera);
+    glowPass(frame_camera);
 
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(rl.getColor(background));
-    rl.beginMode3D(camera);
+    rl.beginMode3D(frame_camera);
+    drawStartRings();
     forEachDrawn(cords, drawCord);
     forEachDrawn(balls, ballDrawer(1, null));
     forEachDrawn(inputs, drawInputLink);
@@ -196,6 +209,8 @@ fn frame() callconv(.c) void {
     rl.beginBlendMode(.additive);
     for (0..glow_layers) |_| rl.drawTexturePro(glow[0].texture, flipped(glow[0]), .{ .x = 0, .y = 0, .width = @floatFromInt(screenSize()[0]), .height = @floatFromInt(screenSize()[1]) }, .{ .x = 0, .y = 0 }, 0, .white);
     rl.endBlendMode();
+    // Labels last, so the glow doesn't blur them.
+    forEachDrawn(labels, drawLabel);
 
     // CPU work = sim steps + issuing draw calls, up to here. Flush raylib's
     // last draw batch first so it counts. GPU time isn't measured (GL runs
@@ -362,6 +377,38 @@ fn drawInputLink(it: *ecs.iter_t, _: usize, at: sim.Vec3) void {
     while (t < len) : (t += dash_len + dash_gap) {
         rl.drawLine3D(vec3(at + dir * sim.splat(t)), vec3(at + dir * sim.splat(@min(t + dash_len, len))), color);
     }
+}
+
+/// The rings the planets started on, around the barycenter: faded dots.
+fn drawStartRings() void {
+    const color = rl.getColor(start_ring_gray);
+    for (0..sim.planet_rings) |ring| {
+        const r = sim.ringRadius(@intCast(ring));
+        var k: usize = 0;
+        while (k < start_ring_segments) : (k += 2) {
+            const a0 = std.math.tau * @as(f32, @floatFromInt(k)) / start_ring_segments;
+            const a1 = std.math.tau * @as(f32, @floatFromInt(k + 1)) / start_ring_segments;
+            rl.drawLine3D(vec3(cam.target + sim.ringDir(a0) * sim.splat(r)), vec3(cam.target + sim.ringDir(a1) * sim.splat(r)), color);
+        }
+    }
+}
+
+/// A body's name on screen beside its sphere; none behind the camera.
+fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    const forward = cam.target - eye;
+    if (sim.dot(at - eye, forward) <= 0) return;
+    const b = ecs.field(it, sim.Ball, 2).?[i];
+    const text = ecs.field(it, sim.Label, 3).?[i].text;
+    const center = rl.getWorldToScreen(vec3(at), frame_camera);
+    // The sphere's on-screen radius: project a point on its right edge.
+    const right = sim.normalize(sim.cross(forward, .{ 0, 1, 0 }));
+    const edge = rl.getWorldToScreen(vec3(at + right * sim.splat(b.radius)), frame_camera);
+    const offset = @abs(edge.x - center.x) + label_gap;
+    const text_w: f32 = @floatFromInt(rl.measureText(text, label_font_size));
+    // Right of the sphere, or left of it where the right would run off screen.
+    const x = if (center.x + offset + text_w > @as(f32, @floatFromInt(screenSize()[0]))) center.x - offset - text_w else center.x + offset;
+    const y = center.y - label_font_size / 2;
+    rl.drawText(text, @intFromFloat(x), @intFromFloat(y), label_font_size, rl.getColor(label_color));
 }
 
 /// A gray circle around a mother that always faces the camera.
