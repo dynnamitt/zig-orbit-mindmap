@@ -611,8 +611,8 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     rl.drawText(text, xi, yi, size, rl.getColor(if (output) b.rgba else label_color));
 }
 
-/// Hands this frame's stars (drawn positions, colour × share of the mass,
-/// scaled like the star, so a parked output gives no light) to
+/// Hands this frame's stars (drawn positions, colour × share of the mass;
+/// none from a parked output) to
 /// the planet shader.
 fn lightPlanets() void {
     star_n = 0;
@@ -630,7 +630,7 @@ fn lightPlanets() void {
 fn gatherStar(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     if (star_n == sim.max_stars) return;
     const b = ecs.field(it, sim.Ball, 2).?[i];
-    const mass = ecs.field(it, sim.Star, 3).?[i].mass * b.scale;
+    const mass = if (b.scale > 0) ecs.field(it, sim.Star, 3).?[i].mass else 0;
     const c = rl.getColor(b.rgba);
     const k: usize = @intCast(star_n);
     star_pos[k] = .{ at[0], at[1], at[2] };
@@ -692,8 +692,7 @@ fn drawPlanet(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
 
 /// A gray circle around a mother that always faces the camera.
 fn drawRing(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
-    const b = ecs.field(it, sim.Ball, 2).?[i];
-    const r = b.size() * ring_scale;
+    const r = ringRadius(it.entities()[i]);
     // The camera's own axes (the direction to the mother itself may be vertical).
     drawCircle(at, view[1] * sim.splat(r), view[2] * sim.splat(r), ring_segments, 1, 0, rl.getColor(link_gray));
 }
@@ -719,8 +718,7 @@ fn drawSegment(a: sim.Vec3, b: sim.Vec3, width: f32, color: rl.Color) void {
 }
 
 fn ringRadius(mother: ecs.entity_t) f32 {
-    const b = ecs.get(world, mother, sim.Ball).?;
-    return b.size() * ring_scale;
+    return ecs.get(world, mother, sim.Ball).?.size() * ring_scale;
 }
 
 /// `drawnAt` for an entity looked up by id.
@@ -774,12 +772,10 @@ fn pressOutputButtons() bool {
         const at = if (touching) rl.getTouchPosition(0) else rl.getMousePosition();
         const cells = outputButtons();
         const n: usize = sim.outputs(world);
-        if (rl.checkCollisionPointRec(at, cells[0])) {
+        const pick: ?usize = if (rl.checkCollisionPointRec(at, cells[0])) n - 1 else if (rl.checkCollisionPointRec(at, cells[2])) n + 1 else null;
+        if (pick) |m| {
             ui_hold = true;
-            sim.setOutputs(world, n - 1);
-        } else if (rl.checkCollisionPointRec(at, cells[2])) {
-            ui_hold = true;
-            sim.setOutputs(world, n + 1);
+            sim.setOutputs(world, m);
         }
     }
     return ui_hold;
@@ -791,10 +787,16 @@ fn drawOutputButtons() void {
     const cells = outputButtons();
     var buf: [4]u8 = undefined;
     const count = std.fmt.bufPrintSentinel(&buf, "{d}", .{n}, 0) catch unreachable;
-    for (cells, [_][:0]const u8{ "-", count, "+" }, [_]?bool{ n > 1, null, n < sim.output_max }) |r, text, enabled| {
-        const color = rl.getColor(if (enabled) |on| (if (on) sand else ui_disabled) else label_color);
-        if (enabled != null) rl.drawRectangleLinesEx(r, ui_border, color);
-        const w = rl.measureText(text, ui_font_size);
-        rl.drawText(text, @as(i32, @intFromFloat(r.x)) + @divTrunc(ui_button - w, 2), @as(i32, @intFromFloat(r.y)) + (ui_button - ui_font_size) / 2, ui_font_size, color);
+    drawCentered(cells[1], count, rl.getColor(label_color));
+    for ([_]rl.Rectangle{ cells[0], cells[2] }, [_][:0]const u8{ "-", "+" }, [_]bool{ n > 1, n < sim.output_max }) |r, text, enabled| {
+        const color = rl.getColor(if (enabled) sand else ui_disabled);
+        rl.drawRectangleLinesEx(r, ui_border, color);
+        drawCentered(r, text, color);
     }
+}
+
+/// `text` centred in a button cell.
+fn drawCentered(r: rl.Rectangle, text: [:0]const u8, color: rl.Color) void {
+    const w = rl.measureText(text, ui_font_size);
+    rl.drawText(text, @as(i32, @intFromFloat(r.x)) + @divTrunc(ui_button - w, 2), @as(i32, @intFromFloat(r.y)) + (ui_button - ui_font_size) / 2, ui_font_size, color);
 }
