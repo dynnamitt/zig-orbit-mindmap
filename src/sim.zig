@@ -89,6 +89,22 @@ pub const planet_count = planets.len;
 /// Rings the scene's planets start on: the default one, plus the bumped one
 /// past `planet_ring_max`.
 pub const planet_rings: u2 = if (planet_count > planet_ring_max) 2 else 1;
+// Thrusters (#21): a planet further than `thrust_on` × its ring radius from
+// its slot fires until it is back within `thrust_off` (hysteresis, so it
+// doesn't flicker). The slot turns around the barycenter at the ring's
+// speed, so thrusters also restore the even spacing. Thrust is a damped
+// spring toward the slot's position and velocity, capped at `thrust_max`
+// (planets feel ~1.7 of gravity); gravity keeps acting throughout. A
+// 10-minute probe with 12 planets: within 0.10 radii of their slots and 8°
+// of even spacing, thrusting ~1/3 of the time in ~2.4 s bursts. (Wider
+// thresholds are worse: the further a planet drifts, the faster its phase
+// runs off.)
+const thrust_on = 0.08;
+const thrust_off = 0.02;
+const thrust_k = 2.0; // per s², toward the slot's position
+const thrust_damp = 2.8; // per s, toward the slot's velocity (~critical for k)
+const thrust_max = 1.6;
+
 /// How far the planets reach from the barycenter, for framing.
 pub const system_radius = planet_ring_r + (if (planet_count > planet_ring_max) planet_ring_bump else 0) + planet_radius;
 
@@ -175,6 +191,13 @@ pub const StarField = struct {
 };
 /// Tag: a planet, pulled by every star.
 pub const Planet = struct {};
+/// Where a planet belongs: on its ring (`r`), at `phase`, which turns at the
+/// ring's speed `omega` (rad/s), so the slots keep the even spacing.
+pub const Slot = struct { r: f32, phase: f32, omega: f32 };
+/// A planet's thruster: `on` while it steers back to its slot, pushing along
+/// `dir` (unit; while idle, the way its slot moves); `time` counts how long it
+/// has been firing.
+pub const Thruster = struct { on: bool = false, dir: Vec3 = .{ 0, 1, 0 }, time: f32 = 0 };
 /// A name to show next to a body (planets and child stars).
 pub const Label = struct { text: [:0]const u8 };
 /// Tag: the mother star (the IPO's process). Her children hang on cords;
@@ -218,6 +241,8 @@ pub fn register(world: *ecs.world_t) void {
     ecs.COMPONENT(world, StarField);
     ecs.TAG(world, Planet);
     ecs.COMPONENT(world, Label);
+    ecs.COMPONENT(world, Slot);
+    ecs.COMPONENT(world, Thruster);
     ecs.TAG(world, Mother);
     ecs.TAG(world, InputOf);
     // Before any star exists: system terms on singletons need them to match.
@@ -237,6 +262,10 @@ pub fn register(world: *ecs.world_t) void {
     });
     addSystem(world, "pull", ecs.PreUpdate, pull, &.{
         .{ .id = ecs.id(Planet), .inout = .InOutNone },
+        .{ .id = ecs.id(StarField), .src = .{ .id = ecs.id(StarField) }, .inout = .In },
+    });
+    // After pull: gravity first, then the correction.
+    addSystem(world, "thrust", ecs.PreUpdate, thrust, &.{
         .{ .id = ecs.id(StarField), .src = .{ .id = ecs.id(StarField) }, .inout = .In },
     });
     addSystem(world, "move", ecs.OnUpdate, move, &.{});
@@ -280,6 +309,8 @@ const cluster_cord = 3;
 const cluster_home = 4;
 // pull's extra terms come after its own two params.
 const pull_field = 3;
+// thrust's extra term comes after its own four params (fields 0-3).
+const thrust_field = 4;
 const bary_pos = 0;
 const bary_vel = 1;
 const bary_star = 2;
@@ -367,6 +398,33 @@ fn pull(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity) vo
         const r2 = dot(out, out);
         if (r2 > 0) a -= out * splat(planet_settle * dot(v.v - f.drift, out) / r2);
         v.v += a * splat(dt);
+    }
+}
+
+/// Advances each planet's slot and fires its thruster while it is off it.
+fn thrust(it: *ecs.iter_t, positions: []const Position, velocities: []Velocity, slots: []Slot, thrusters: []Thruster) void {
+    const f = &ecs.field(it, StarField, thrust_field).?[0];
+    const dt = it.delta_time;
+    for (positions, velocities, slots, thrusters) |p, *v, *slot, *t| {
+        // Compare with the slot where it is now, then move the slot on.
+        defer slot.phase = @mod(slot.phase + slot.omega * dt, std.math.tau);
+        const target = f.center + ringDir(slot.phase) * splat(slot.r);
+        const ahead = ringDir(slot.phase + std.math.pi / 2.0);
+        const target_v = f.drift + ahead * splat(slot.omega * slot.r);
+        const off = length(target - p.v) / slot.r;
+        if (off > thrust_on) t.on = true else if (off < thrust_off) t.on = false;
+        if (!t.on) {
+            // Idle, the nozzle trails the planet round its ring.
+            t.dir = ahead;
+            t.time = 0;
+            continue;
+        }
+        var a = (target - p.v) * splat(thrust_k) + (target_v - v.v) * splat(thrust_damp);
+        const n = length(a);
+        if (n > thrust_max) a *= splat(thrust_max / n);
+        if (n > 0) t.dir = a / splat(@min(n, thrust_max));
+        v.v += a * splat(dt);
+        t.time += dt;
     }
 }
 
@@ -661,6 +719,8 @@ const PlanetSlot = struct {
     /// 0: the default ring, 1: the bumped one.
     ring: u1,
     r: f32,
+    /// Angle on the ring (`ringDir`).
+    phase: f32,
     /// Unit vectors from the barycenter: outward to the planet, and its
     /// direction of travel (counter-clockwise seen from above), both on the
     /// tilted orbit plane.
@@ -674,6 +734,7 @@ fn planetSlot(i: usize, n: usize) PlanetSlot {
     return .{
         .ring = ring,
         .r = ringRadius(ring),
+        .phase = phase,
         .dir = ringDir(phase),
         .along = ringDir(phase + std.math.pi / 2.0),
     };
@@ -710,6 +771,8 @@ pub fn spawnPlanets(world: *ecs.world_t, mother: ecs.entity_t, comptime n: usize
         // circular around it.
         const speed = @sqrt(@max(0, inward[slot.ring] / on_ring[slot.ring]) * slot.r);
         e.* = spawnPlanet(world, mother, f.center + slot.dir * splat(slot.r), f.drift + slot.along * splat(speed), planets[i % planets.len]);
+        set(world, e.*, Slot, .{ .r = slot.r, .phase = slot.phase, .omega = speed / slot.r });
+        set(world, e.*, Thruster, .{});
     }
     return out;
 }
@@ -968,12 +1031,11 @@ test "planets stay near their orbits and planes for two minutes" {
         const b = positionOf(world, ecs.id(Barycenter));
         for (sc.ps, 0..) |e, i| {
             const d = positionOf(world, e) - b;
-            // The stars' pull (and the radial damping) move them, so they drift
-            // (a 2-minute probe: 0.89-1.14
-            // radii, 0.10 radii off the plane; 10 minutes: up to 1.34 and 0.15).
+            // The thrusters hold each planet within about 0.1 radii of its
+            // slot (see the slot test), so of its ring radius and plane.
             const slot_r = planetSlot(i, planet_count).r;
             const r = length(d) / slot_r;
-            try expect(r > 0.85 and r < 1.2);
+            try expect(r > 0.88 and r < 1.12);
             try expect(@abs(rotate(d, planet_tilt_axis, -planet_tilt)[1]) / slot_r < 0.13);
         }
     }
@@ -1288,4 +1350,53 @@ test "ringDir/ringRadius trace the rings planets start on" {
         try expect(distance(positionOf(world, e), f.center + ringDir(phase) * splat(ringRadius(slot.ring))) < 1e-3);
     }
     try expectEqual(@as(u2, 2), planet_rings); // 12 planets: two rings
+}
+
+/// Where `e`'s slot is now, and how far off it the planet is (in radii).
+fn slotOff(world: *ecs.world_t, e: ecs.entity_t) f32 {
+    const f = ecs.get(world, ecs.id(StarField), StarField).?;
+    const s = ecs.get(world, e, Slot).?;
+    return distance(positionOf(world, e), f.center + ringDir(s.phase) * splat(s.r)) / s.r;
+}
+
+test "thrusters: on its slot a planet coasts" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    step(world, 1);
+    for (sc.ps) |e| try expect(!ecs.get(world, e, Thruster).?.on);
+}
+
+test "thrusters: a displaced planet fires until it is back on its slot" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    const p = sc.ps[0];
+    const b = positionOf(world, ecs.id(Barycenter));
+    set(world, p, Position, .{ .v = b + (positionOf(world, p) - b) * splat(1.3) }); // 30% out
+    step(world, 1);
+    const t = ecs.get(world, p, Thruster).?;
+    try expect(t.on);
+    // It pushes back in, toward the barycenter.
+    try expect(dot(t.dir, positionOf(world, p) - b) < 0);
+    var steps: usize = 0;
+    while (ecs.get(world, p, Thruster).?.on) : (steps += 1) {
+        try expect(steps < 20 * 60);
+        step(world, 1);
+    }
+    try expect(slotOff(world, p) < thrust_off + 0.01);
+}
+
+test "thrusters: every planet stays near its slot (and the even spacing) for two minutes" {
+    const world = ecs.init();
+    defer _ = ecs.fini(world);
+    register(world);
+    const sc = spawnScene(world, planet_count);
+    for (0..2 * 60 * 60) |_| {
+        step(world, 1);
+        // A 10-minute probe stayed within 0.10 radii.
+        for (sc.ps) |e| try expect(slotOff(world, e) < 0.13);
+    }
 }
