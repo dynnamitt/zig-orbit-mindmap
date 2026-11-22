@@ -30,7 +30,7 @@ const start_ring_gray = 0x66666670;
 const start_ring_segments = 160;
 // Thrusters (sim.Thruster): a nozzle disc set into the planet on the side it
 // pushes from, and while firing a tapered, pulsing exhaust beam out of it,
-// opposite where the planet is heading. Both glow while firing.
+// opposite its thrust (which points toward its slot). Both glow while firing.
 const nozzle_idle = 0x2A2E2EFF; // dark, like a hole
 const flame = 0xFF9A3CFF; // orange
 const flame_hot = 0xFFF2C8FF; // near white, at the pulse peak

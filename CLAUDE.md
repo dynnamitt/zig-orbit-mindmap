@@ -52,9 +52,9 @@ The scene lays out an Input-Process-Output model as a star system (sample data: 
 
 | IPO | Body | Look |
 |---|---|---|
-| **P** | `Mother` star | Brightest, warm white, smaller than her children, unlabelled, a gray ring outside her glow |
+| **P** | `Mother` star | Warm white (the lightest colour), smaller than her children, unlabelled, a gray ring around her |
 | **O** | Child stars ×3 | Green, labelled, tied to her by glowing cords (`(Cord, mother)`) |
-| **I** | Planets ×12 | Lit, labelled, a dotted gray line to her (`(InputOf, mother)`), a thruster each |
+| **I** | Planets ×12 | Lit, labelled, a dashed gray line to her ring (`(InputOf, mother)`), a thruster each |
 
 ### Frame loop (main.zig)
 
@@ -69,8 +69,8 @@ The scene lays out an Input-Process-Output model as a star system (sample data: 
 
 `forEachDrawn(query, callback)` runs a draw callback per entity of a sim query (all put `Position`, optional `PrevPosition` first; `ballQuery(world, ?Tag)` and `linkQuery(world, Rel)`, link targets via `pairTarget`). Per frame:
 
-1. **Glow pass** (`glowPass`, into a half-size texture): every ball in black (so planets hide the glow behind them), then cords, stars (`ballQuery(world, Star)`, drawn larger) and firing thrusters; then a 9-tap Gaussian blur (`src/shaders/blur.fs`).
-2. **Scene,** in `beginMode3D`: the planets' layout rings as faded dots around the current barycenter (`drawStartRings`, from `sim.ringRadius`/`ringDir`); cords (thicker as they shorten, `Cord.radius`); stars flat (they glow); planets lit (`lightPlanets` hands the stars' drawn positions and colour × mass share to `src/shaders/planet.{vs,fs}`, and `drawPlanet` draws one unit sphere mesh, which has normals where `drawSphere` doesn't, scaled per planet); thrusters (a nozzle disc, and while firing a pulsing exhaust beam opposite where the planet heads); the gray planet links; the mothers' camera-facing rings.
+1. **Glow pass** (`glowPass`, into a half-size texture): every ball in black (so planets hide the glow behind them), then cords, stars (`ballQuery(world, Star)`, drawn larger) and firing thrusters; then `blur_rounds` rounds of a separable 9-tap Gaussian (horizontal, then vertical, ping-ponging between `glow[0]` and `glow[1]`; taps `blur_spread` texels apart; `src/shaders/blur.fs`).
+2. **Scene,** in `beginMode3D`: the planets' layout rings as faded dots around the current barycenter (`drawStartRings`, from `sim.ringRadius`/`ringDir`); cords (thicker as they shorten, `Cord.radius`); stars flat (they glow); planets lit (`lightPlanets` hands the stars' drawn positions and colour × mass share to `src/shaders/planet.{vs,fs}`, and `drawPlanet` draws one unit sphere mesh, which has normals where `drawSphere` doesn't, scaled per planet); thrusters (a nozzle disc, and while firing a pulsing exhaust beam opposite its thrust, which points toward the slot); the gray planet links; the mothers' camera-facing rings.
 3. **Glow composite:** the blurred texture added on top twice (`glow_layers`).
 4. **Labels** (`drawLabel`), last so they stay crisp: each `Label` beside its sphere, flipping left at the screen edge.
 
