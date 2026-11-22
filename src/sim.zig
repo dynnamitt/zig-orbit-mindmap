@@ -66,7 +66,7 @@ const planet_tilt = 0.06;
 const planet_tilt_axis: Vec3 = .{ 1, 0, 0 };
 // The sample IPO: this project's own build. The mother is `zig build` (the
 // process, unlabelled); the planets are its inputs and her children its
-// outputs. Planet colours: the tech-trio.svg palette (teal, orange, sand,
+// outputs. Planet colours: the tech-trio palette (teal, orange, sand,
 // light gray) with lighter, darker and nearby shades. Cycled past the table
 // (tests spawn more).
 const PlanetData = struct { name: [:0]const u8, rgba: u32 };

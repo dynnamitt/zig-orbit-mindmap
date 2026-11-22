@@ -11,7 +11,7 @@ const long_side = 800;
 const short_side = 450;
 /// The smallest window (both sides; raylib clamps to it, natively and on web).
 const min_side = 64;
-// Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
+// Render-only colours (tech-trio palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const sand = 0xC8A878FF; // readout text
 const link_gray = 0x666666FF; // the mother's ring
