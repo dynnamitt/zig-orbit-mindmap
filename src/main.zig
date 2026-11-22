@@ -4,6 +4,7 @@ const rl = @import("raylib");
 const ecs = @import("zflecs");
 const sim = @import("sim");
 const config = @import("config");
+const text = @import("text.zig");
 
 /// Native starting size, landscape; `--portrait` swaps the two. The window is
 /// resizable, and on web raylib sizes it to the viewport.
@@ -57,22 +58,21 @@ const beam_sides = 10;
 /// The flame's colorBrightness in the glow pass: a slightly softer aura.
 const flame_glow = -0.25;
 
-// Labels: screen-space text beside each named body, drawn after bloom.
+// Labels: screen-space text beside each named body, drawn after bloom, each
+// on a pill of the background colour (part see-through) so it reads over
+// glow, rings and links. Inputs in mono (file names) at `text.label`;
+// outputs (bodies with a `(Cord, mother)` pair) in sans at `text.heading`,
+// in their star's own green.
 const label_color = 0xE0D8C8FF; // pale sand
-const label_font_size = 16; // at the default zoom and further out
-/// Outputs (bodies with a `(Cord, mother)` pair): larger, in their star's own green. 20 is 2x
-/// raylib's 10 px default font, so it stays crisp.
-const output_font_size = 20;
-/// Their dark outline (the background colour, part see-through), so they read
-/// over the glow: 1 px at `output_font_size`, thicker as they grow.
-/// shortcut: most outline pixels sit under 3-5 of the 8 offset copies, so a
-/// low alpha per copy stacks to about 60-75% (darker in tight spots); draw it
-/// into a render texture once for an even alpha.
-const outline_color = (background & 0xFFFFFF00) | 0x40;
-const outline_offsets = [_][2]i32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
+const pill_color = (background & 0xFFFFFF00) | 0xD1; // 82%
+/// Pill padding and corner radius around the text, at the base size.
+const pill_pad_x = 6;
+const pill_pad_y = 2;
+const pill_radius = 5;
+const pill_segments = 6; // per corner
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
 const label_zoom_follow = 0.8;
-const label_gap = 4; // pixels from the sphere's edge
+const label_gap = 6; // pixels from the sphere's edge
 
 // Bloom: stars, cords and firing thrusters are also drawn into a smaller glow
 // texture, which is blurred and added on top of the scene. Planets go into it
@@ -125,15 +125,13 @@ const ui_button = 36; // px, square
 const ui_gap = 8;
 const ui_left = 16;
 const ui_top = if (web) 64 else 16;
-const ui_font_size = 20;
 const ui_border = 2;
 const ui_disabled = 0x5A5F5AFF; // a button with nothing to do
 /// Labels hide on stars shrunk below this (parked outputs, mostly).
 const label_hide_scale = 0.3;
-// Perf readout: top-right, right-aligned, raylib's default font size.
+// Perf readout: top-right, right-aligned, mono at `text.caption`.
 // The buffer fits any i32 FPS and any sane ms pair.
 const stats_margin = 16;
-const stats_font_size = 20;
 const stats_line_gap = 4;
 const stats_buf_len = 64;
 // emscripten_set_main_loop args: fps 0 = requestAnimationFrame; nonzero
@@ -232,6 +230,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     rl.setConfigFlags(.{ .window_resizable = true });
     rl.initWindow(if (portrait) short_side else long_side, if (portrait) long_side else short_side, "zig-orbit-mindmap");
     defer rl.closeWindow();
+    defer text.deinit(); // before the window closes: the atlases are GL textures
     rl.setWindowMinSize(min_side, min_side);
 
     world = ecs.init();
@@ -583,10 +582,10 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     if (sim.dot(at - eye, view[0]) <= 0) return;
     const b = ecs.field(it, sim.Ball, 2).?[i];
     if (b.scale < label_hide_scale) return;
-    const text = ecs.field(it, sim.Label, 3).?[i].text;
     const center = rl.getWorldToScreen(vec3(at), frame_camera);
     // Just in front of the eye (zoomed in among the planets) a body projects
-    // far off screen, beyond what @intFromFloat can hold: no label then.
+    // far off screen, beyond what @intFromFloat (text.draw's fallback) can hold:
+    // no label then.
     const w: f32 = @floatFromInt(screenSize()[0]);
     const h: f32 = @floatFromInt(screenSize()[1]);
     if (!(@abs(center.x) < 4 * w and @abs(center.y) < 4 * h)) return; // also skips NaN
@@ -594,21 +593,24 @@ fn drawLabel(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const edge = rl.getWorldToScreen(vec3(at + view[1] * sim.splat(b.size())), frame_camera);
     const offset = @abs(edge.x - center.x) + label_gap;
     const output = ecs.has_id(it.world, it.entities()[i], ecs.pair(ecs.id(sim.Cord), ecs.Wildcard));
-    const base: f32 = if (output) output_font_size else label_font_size;
-    const zoom = @max(1, cam.zoomFactor());
-    const size: i32 = @intFromFloat(@round(base * std.math.pow(f32, zoom, label_zoom_follow)));
-    const text_w: f32 = @floatFromInt(rl.measureText(text, size));
+    const face: text.Face = if (output) .sans else .mono;
+    const base = if (output) text.heading else text.label;
+    const grow = std.math.pow(f32, @max(1, cam.zoomFactor()), label_zoom_follow);
+    const size = base * grow;
+    const name = ecs.field(it, sim.Label, 3).?[i].text;
+    const dim = text.measure(face, name, size);
+    const pad_x = pill_pad_x * grow;
+    const pad_y = pill_pad_y * grow;
+    const box_w = dim.x + 2 * pad_x;
+    const box_h = dim.y + 2 * pad_y;
     // Right of the sphere, or left of it where the right would run off
     // screen; never past the left edge either.
-    const x = @max(0, if (center.x + offset + text_w > w) center.x - offset - text_w else center.x + offset);
-    const y = center.y - @as(f32, @floatFromInt(size)) / 2;
-    const xi: i32 = @intFromFloat(x);
-    const yi: i32 = @intFromFloat(y);
-    if (output) {
-        const t = @max(1, @divTrunc(size, output_font_size));
-        for (outline_offsets) |d| rl.drawText(text, xi + d[0] * t, yi + d[1] * t, size, rl.getColor(outline_color));
-    }
-    rl.drawText(text, xi, yi, size, rl.getColor(if (output) b.rgba else label_color));
+    const x = @max(0, if (center.x + offset + box_w > w) center.x - offset - box_w else center.x + offset);
+    const y = center.y - box_h / 2;
+    const box: rl.Rectangle = .{ .x = x, .y = y, .width = box_w, .height = box_h };
+    // raylib's roundness is the corner radius over half the shorter side.
+    rl.drawRectangleRounded(box, @min(1, 2 * pill_radius * grow / @min(box_w, box_h)), pill_segments, rl.getColor(pill_color));
+    text.draw(face, name, .{ .x = x + pad_x, .y = y + pad_y }, size, rl.getColor(if (output) b.rgba else label_color));
 }
 
 /// Hands this frame's stars (drawn positions, colour × share of the mass;
@@ -745,9 +747,9 @@ extern fn rlDisableDepthMask() void;
 extern fn rlEnableDepthMask() void;
 
 /// One right-aligned readout line; `line` 0 is the top.
-fn drawStat(text: [:0]const u8, line: i32) void {
-    const x = screenSize()[0] - stats_margin - rl.measureText(text, stats_font_size);
-    rl.drawText(text, x, stats_margin + line * (stats_font_size + stats_line_gap), stats_font_size, rl.getColor(sand));
+fn drawStat(line_text: [:0]const u8, line: f32) void {
+    const x = @as(f32, @floatFromInt(screenSize()[0])) - stats_margin - text.measure(.mono, line_text, text.caption).x;
+    text.draw(.mono, line_text, .{ .x = x, .y = stats_margin + line * (text.caption + stats_line_gap) }, text.caption, rl.getColor(sand));
 }
 
 /// The output buttons' cells, left to right: −, the count, +.
@@ -787,16 +789,17 @@ fn drawOutputButtons() void {
     const cells = outputButtons();
     var buf: [4]u8 = undefined;
     const count = std.fmt.bufPrintSentinel(&buf, "{d}", .{n}, 0) catch unreachable;
-    drawCentered(cells[1], count, rl.getColor(label_color));
-    for ([_]rl.Rectangle{ cells[0], cells[2] }, [_][:0]const u8{ "-", "+" }, [_]bool{ n > 1, n < sim.output_max }) |r, text, enabled| {
+    drawCentered(cells[1], count, text.heading, rl.getColor(label_color));
+    // − is the minus sign (U+2212), as wide as +; a hyphen looks too short.
+    for ([_]rl.Rectangle{ cells[0], cells[2] }, [_][:0]const u8{ "\u{2212}", "+" }, [_]bool{ n > 1, n < sim.output_max }) |r, glyph, enabled| {
         const color = rl.getColor(if (enabled) sand else ui_disabled);
         rl.drawRectangleLinesEx(r, ui_border, color);
-        drawCentered(r, text, color);
+        drawCentered(r, glyph, text.icon, color);
     }
 }
 
-/// `text` centred in a button cell.
-fn drawCentered(r: rl.Rectangle, text: [:0]const u8, color: rl.Color) void {
-    const w = rl.measureText(text, ui_font_size);
-    rl.drawText(text, @as(i32, @intFromFloat(r.x)) + @divTrunc(ui_button - w, 2), @as(i32, @intFromFloat(r.y)) + (ui_button - ui_font_size) / 2, ui_font_size, color);
+/// `str` (sans, at `size`) centred in a button cell.
+fn drawCentered(r: rl.Rectangle, str: [:0]const u8, size: f32, color: rl.Color) void {
+    const dim = text.measure(.sans, str, size);
+    text.draw(.sans, str, .{ .x = r.x + (r.width - dim.x) / 2, .y = r.y + (r.height - dim.y) / 2 }, size, color);
 }

@@ -118,6 +118,14 @@ fn addWebBuild(
     });
     if (builtin.os.tag == .windows) try useEmccBat(b, emcc_step);
     b.getInstallStep().dependOn(emcc_step);
+    // The fonts the app embeds, for the page's own title (web/shell.html
+    // @font-face), with their licences.
+    b.installDirectory(.{
+        .source_dir = b.path("src/fonts"),
+        .install_dir = .{ .custom = "web" },
+        .install_subdir = "fonts",
+        .include_extensions = &.{ ".ttf", ".txt" },
+    });
 
     const emrun = try emsdk.emrunStep(b, b.graph.path(.install_prefix, "web/index.html"), &.{});
     emrun.dependOn(emcc_step);

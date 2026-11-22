@@ -5,9 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>zig-orbit-mindmap</title>
   <style>
+    /* The app's own faces (src/fonts, embedded by src/text.zig; the build
+       installs them in fonts/), so the title matches the canvas text. */
+    @font-face { font-family: "Inter"; font-weight: 600; font-display: swap;
+                 src: url("fonts/Inter-SemiBold.ttf") format("truetype"); }
+    @font-face { font-family: "JetBrains Mono"; font-weight: 400; font-display: swap;
+                 src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype"); }
     /* Colours: the tech-trio palette, as in src/main.zig and src/sim.zig. */
     html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1414; color: #c8a878;
-                 font: 14px system-ui, sans-serif; }
+                 font: 600 14px Inter, system-ui, sans-serif; }
     /* The app sizes the canvas to the whole viewport (raylib's resizable
        window, main.zig: resize), at any aspect; CSS only pins it in place.
        touch-action: drags and pinches steer the camera, not the page. */
@@ -16,9 +22,9 @@
     h1, #status { position: fixed; z-index: 1; margin: 0; pointer-events: none; }
     /* Top left, opposite the app's readout (top right). A narrow phone has
        no room for both on one line, so the subtitle drops below the name. */
-    h1 { left: 12px; top: 8px; font-size: 20px; font-weight: 600; }
-    h1 span { color: #2e7e7e; font-weight: normal; }
-    @media (max-width: 600px) { h1 span { display: block; } }
+    h1 { left: 16px; top: 10px; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+    h1 span { color: #2e7e7e; font: 400 13px "JetBrains Mono", ui-monospace, monospace; letter-spacing: 0; margin-left: 4px; }
+    @media (max-width: 600px) { h1 span { display: block; margin-left: 0; } }
     #status { left: 0; right: 0; top: 50%; text-align: center; }
     #status:empty { display: none; }
   </style>
