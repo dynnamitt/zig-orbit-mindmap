@@ -50,7 +50,8 @@ const planet_settle = 0.1;
 // `planet_tilt` off xz. Only the colour differs. Past `planet_ring_max`
 // planets the odd ones (0-based) move out to a ring `planet_ring_bump`
 // further out; the even ones stay, and the angles stay even overall, so the
-// two rings interleave.
+// two rings interleave (fully only for an even count: with an odd one the
+// last and first planets are both inner, side by side).
 const planet_ring_r = 9.0;
 const planet_ring_bump = 2.5;
 const planet_ring_max = 8;
@@ -888,7 +889,8 @@ test "planets stay near their orbits and planes for two minutes" {
         const b = positionOf(world, ecs.id(Barycenter));
         for (sc.ps, 0..) |e, i| {
             const d = positionOf(world, e) - b;
-            // Gravity alone moves them, so they drift (a 2-minute probe: 0.89-1.14
+            // The stars' pull (and the radial damping) move them, so they drift
+            // (a 2-minute probe: 0.89-1.14
             // radii, 0.10 radii off the plane; 10 minutes: up to 1.34 and 0.15).
             const slot_r = planetSlot(i, planet_count).r;
             const r = length(d) / slot_r;
@@ -930,6 +932,8 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
         const f = ecs.get(world, ecs.id(StarField), StarField).?;
         const normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
         var speed = [2]?f32{ null, null };
+        var inward = [2]f32{ 0, 0 };
+        var on_ring = [2]f32{ 0, 0 };
         for (sc.ps, 0..) |e, i| {
             const slot = planetSlot(i, n);
             try expectEqual(@as(u1, @intFromBool(n > planet_ring_max and i % 2 == 1)), slot.ring);
@@ -939,13 +943,21 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
             // The same angle apart, on one tilted plane.
             const phase = std.math.tau * @as(f32, @floatFromInt(i)) / n;
             try expect(distance(normalize(d), rotate(.{ @cos(phase), 0, -@sin(phase) }, planet_tilt_axis, planet_tilt)) < 1e-4);
-            try expect(distance(normalize(cross(d, v)), normal) < 1e-4); // tangential, on the plane
+            try expectApproxEqAbs(@as(f32, 0), dot(v, d), 1e-2); // tangential
+            try expect(distance(normalize(cross(d, v)), normal) < 1e-4); // on the plane
             // One speed per ring.
             if (speed[slot.ring]) |s0| try expectApproxEqAbs(s0, length(v), 1e-4) else speed[slot.ring] = length(v);
+            inward[slot.ring] += -dot(fieldPull(f, positionOf(world, e)), normalize(d));
+            on_ring[slot.ring] += 1;
             const b = ecs.get(world, e, Ball).?;
             try expectEqual(@as(f32, planet_radius), b.radius);
             try expectEqual(planet_colors[i % planet_colors.len], b.rgba);
         }
+        // That speed is circular for the ring's mean inward pull: v² = pull · r.
+        for (0..2) |ring| if (speed[ring]) |v| {
+            const r = planet_ring_r + @as(f32, @floatFromInt(ring)) * planet_ring_bump;
+            try expectApproxEqAbs(inward[ring] / on_ring[ring] * r, v * v, 1e-2);
+        };
     }
 }
 
