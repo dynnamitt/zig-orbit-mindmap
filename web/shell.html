@@ -14,10 +14,11 @@
     canvas { position: fixed; left: 0; top: 0; display: block; touch-action: none; }
     /* The title and status float over the scene and never catch input. */
     h1, #status { position: fixed; z-index: 1; margin: 0; pointer-events: none; }
-    /* Bottom left: the app's readout is top right, and a narrow phone has
-       no room for both on one line. */
-    h1 { left: 12px; bottom: 8px; font-size: 20px; font-weight: 600; }
+    /* Top left, opposite the app's readout (top right). A narrow phone has
+       no room for both on one line, so the subtitle drops below the name. */
+    h1 { left: 12px; top: 8px; font-size: 20px; font-weight: 600; }
     h1 span { color: #2e7e7e; font-weight: normal; }
+    @media (max-width: 600px) { h1 span { display: block; } }
     #status { left: 0; right: 0; top: 50%; text-align: center; }
     #status:empty { display: none; }
   </style>

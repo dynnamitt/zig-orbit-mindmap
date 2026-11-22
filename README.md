@@ -10,7 +10,7 @@ A 3D star system as an IPO (input → process → output) mind map, in Zig 0.17 
 
 - **Process:** the warm-white mother star, in the middle.
 - **Outputs:** green child stars, tied to her by glowing cords.
-- **Inputs:** planets that orbit the cluster's centre of gravity, pulled by every star. Each has a dashed line to the mother and a thruster that fires to bring it back to its slot on the ring.
+- **Inputs:** planets that orbit the cluster's centre of gravity, pulled by every star. Each has a dashed line to the mother's ring and a thruster that fires to bring it back to its slot on the ring.
 
 Drag (or one finger) to orbit the camera; scroll (or pinch) to zoom. The window resizes freely, and
 in the browser it fills the viewport in either orientation.

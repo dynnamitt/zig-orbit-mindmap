@@ -14,7 +14,7 @@ const min_side = 64;
 // Render-only colours (tech-trio.svg palette; ball colours are in sim.zig).
 const background = 0x0E1414FF; // near-black teal
 const sand = 0xC8A878FF; // readout text
-const link_gray = 0x666666FF; // planet-to-mother dots and the mother's ring
+const link_gray = 0x666666FF; // planet-to-ring dashes and the mother's ring
 const cord_glow = 0xB8F5C8FF; // pale green: the children's cords
 
 // Links (world units). Cords are glowing cylinders (thickness: sim.Cord.radius);
@@ -30,7 +30,8 @@ const start_ring_gray = 0x66666670;
 const start_ring_segments = 160;
 // Thrusters (sim.Thruster): a nozzle disc set into the planet on the side it
 // pushes from, and while firing a tapered, pulsing exhaust beam out of it,
-// opposite its thrust (which points toward its slot). Both glow while firing.
+// opposite its thrust (sim.zig `thrust`: it can point away from the slot while
+// braking). Both glow while firing.
 const nozzle_idle = 0x2A2E2EFF; // dark, like a hole
 const flame = 0xFF9A3CFF; // orange
 const flame_hot = 0xFFF2C8FF; // near white, at the pulse peak
@@ -45,9 +46,9 @@ const label_color = 0xE0D8C8FF; // pale sand
 const label_font_size = 16;
 const label_gap = 4; // pixels from the sphere's edge
 
-// Bloom: stars and cords are also drawn into a smaller glow texture, which is
-// blurred and added on top of the scene. Planets go into it in black (so they
-// hide the glow behind them); gray links and rings stay out.
+// Bloom: stars, cords and firing thrusters are also drawn into a smaller glow
+// texture, which is blurred and added on top of the scene. Planets go into it
+// in black (so they hide the glow behind them); gray links and rings stay out.
 const glow_downscale = 2; // glow texture size = window size / this
 /// Glowing spheres are drawn this much larger than the stars, for a wider aura.
 const glow_grow = 1.4;
@@ -217,7 +218,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     loc_star_count = rl.getShaderLocation(planet_material.shader, "starCount");
     loc_star_pos = rl.getShaderLocation(planet_material.shader, "starPos");
     loc_star_light = rl.getShaderLocation(planet_material.shader, "starLight");
-    // raylib falls back to its default shader when ours doesn't compile
+    // raylib falls back to its default shader when ours doesn't compile or link
     // (e.g. only the ES 1.00 variant on web): fail instead of drawing unlit.
     if (planet_material.shader.id == rlGetShaderIdDefault() or loc_star_count < 0 or loc_star_pos < 0 or loc_star_light < 0)
         return error.PlanetShader;
@@ -349,7 +350,8 @@ fn unloadGlow() void {
     for (glow) |g| rl.unloadRenderTexture(g);
 }
 
-/// Stars (a bit larger) and cords into glow[0], then blurred there.
+/// Every ball in black, then cords, stars (a bit larger) and firing thrusters
+/// into glow[0], then blurred there.
 fn glowPass(camera: rl.Camera3D) void {
     rl.beginTextureMode(glow[0]);
     rl.clearBackground(.black);
