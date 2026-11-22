@@ -48,10 +48,10 @@ const label_font_size = 16; // at the default zoom and further out
 const output_font_size = 20;
 /// Their dark outline (the background colour, part see-through), so they read
 /// over the glow: 1 px at `output_font_size`, thicker as they grow.
-/// shortcut: most outline pixels sit under 3-5 of the 8 offset copies, so the
-/// alpha stacks to nearly opaque; draw it into a render texture once for a
-/// true see-through outline.
-const outline_color = (background & 0xFFFFFF00) | 0xA0;
+/// shortcut: most outline pixels sit under 3-5 of the 8 offset copies, so a
+/// low alpha per copy stacks to about 60-75% (darker in tight spots); draw it
+/// into a render texture once for an even alpha.
+const outline_color = (background & 0xFFFFFF00) | 0x40;
 const outline_offsets = [_][2]i32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } };
 /// Zoomed in k times, labels grow k^this: a bit less than the bodies do.
 const label_zoom_follow = 0.8;
