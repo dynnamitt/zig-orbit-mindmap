@@ -110,9 +110,9 @@ else
     "#version 330\nin vec3 fragPos;\nin vec3 fragNormal;\nout vec4 fragOut;\n#define FRAG fragOut\n") ++
     std.fmt.comptimePrint("#define MAX_STARS {d}\n", .{sim.max_stars}) ++ @embedFile("shaders/planet.fs");
 // Starfield (src/shaders/sky.fs): drawn first, added onto the background.
-// highp where WebGL has it: the shader's hash needs it.
+// Its hash needs highp: WebGL without it in fragment shaders gets no stars.
 const sky_fs = (if (web)
-    "#version 100\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#define FRAG gl_FragColor\n"
+    "#version 100\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#define SKY_OFF\n#endif\n#define FRAG gl_FragColor\n"
 else
     "#version 330\nout vec4 fragOut;\n#define FRAG fragOut\n") ++ @embedFile("shaders/sky.fs");
 // Perf readout: top-right, right-aligned, raylib's default font size.
@@ -224,9 +224,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     balls = try sim.ballQuery(world, null);
     defer ecs.query_fini(balls);
-    cords = try sim.linkQuery(world, sim.Cord);
+    cords = try sim.linkQuery(world, sim.Cord, &.{});
     defer ecs.query_fini(cords);
-    inputs = try sim.linkQuery(world, sim.InputOf);
+    inputs = try sim.linkQuery(world, sim.InputOf, &.{ sim.Slot, sim.Ball });
     defer ecs.query_fini(inputs);
     mothers = try sim.ballQuery(world, sim.Mother);
     defer ecs.query_fini(mothers);
@@ -264,10 +264,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer rl.unloadShader(sky);
     // Likewise: raylib's fallback shader would paint the whole screen white.
     if (sky.id == rlGetShaderIdDefault()) return error.SkyShader;
-    inline for (@typeInfo(@TypeOf(sky_loc)).@"struct".field_names) |name| {
-        @field(sky_loc, name) = rl.getShaderLocation(sky, name);
-        if (@field(sky_loc, name) < 0) return error.SkyShader;
-    }
+    // Not checked: with SKY_OFF they are compiled out, and -1 sets nothing.
+    inline for (@typeInfo(@TypeOf(sky_loc)).@"struct".field_names) |name| @field(sky_loc, name) = rl.getShaderLocation(sky, name);
 
     if (web) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
@@ -317,10 +315,15 @@ fn frame() callconv(.c) void {
     lightPlanets();
     forEachDrawn(planets, drawPlanet);
     forEachDrawn(thrusters, drawThruster);
-    // See-through last, so they don't hide what is behind them.
+    // See-through last, so they don't hide what is behind them, and
+    // without writing depth, so they don't hide each other either.
+    rlDrawRenderBatchActive(); // the depth mask applies when a batch is drawn
+    rlDisableDepthMask();
     drawStartRings();
     forEachDrawn(inputs, drawInputLink);
     forEachDrawn(mothers, drawRing);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
     rl.endMode3D();
 
     // The blurred glow, added on top.
@@ -497,9 +500,8 @@ fn drawInputLink(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
     const d = drawnOf(mother) - at;
     const len = sim.length(d) - ringRadius(mother);
     if (len <= 0) return;
-    const e = it.entities()[i];
-    const ring = ecs.get(world, e, sim.Slot).?.ring;
-    const off = sim.ringGap(at, cam.target, ring) > ecs.get(world, e, sim.Ball).?.radius;
+    const ring = ecs.field(it, sim.Slot, 3).?[i].ring;
+    const off = sim.ringGap(at, cam.target, ring) > ecs.field(it, sim.Ball, 4).?[i].radius;
     const base = rl.getColor(ring_colors[ring]);
     const width: f32, const color = if (off)
         .{ link_width * link_off_thin, rl.colorAlpha(rl.colorBrightness(base, link_off_brighten), link_off_alpha) }
@@ -527,7 +529,10 @@ fn drawStartRings() void {
 fn drawSky() void {
     const tan_h = @tan(std.math.degreesToRadians(frame_camera.fovy / 2));
     const axes = [3][3]f32{ view[0], view[1] * sim.splat(tan_h * aspect()), view[2] * sim.splat(tan_h) };
+    // gl_FragCoord counts framebuffer pixels (more than screen units on HiDPI);
+    // the rectangle below is in screen units.
     const res = [2]f32{ @floatFromInt(rl.getRenderWidth()), @floatFromInt(rl.getRenderHeight()) };
+    const size = screenSize();
     const time: f32 = @floatCast(rl.getTime());
     rl.setShaderValue(sky, sky_loc.resolution, &res, .vec2);
     rl.setShaderValue(sky, sky_loc.fwd, &axes[0], .vec3);
@@ -536,7 +541,7 @@ fn drawSky() void {
     rl.setShaderValue(sky, sky_loc.time, &time, .float);
     rl.beginShaderMode(sky);
     rl.beginBlendMode(.additive);
-    rl.drawRectangle(0, 0, screenSize()[0], screenSize()[1], .white);
+    rl.drawRectangle(0, 0, size[0], size[1], .white);
     rl.endBlendMode();
     rl.endShaderMode();
 }
@@ -701,6 +706,8 @@ fn vec3(v: sim.Vec3) rl.Vector3 {
 // rlgl, part of the raylib library; raylib-zig doesn't export it as a module.
 extern fn rlDrawRenderBatchActive() void;
 extern fn rlGetShaderIdDefault() c_uint;
+extern fn rlDisableDepthMask() void;
+extern fn rlEnableDepthMask() void;
 
 /// One right-aligned readout line; `line` 0 is the top.
 fn drawStat(text: [:0]const u8, line: i32) void {

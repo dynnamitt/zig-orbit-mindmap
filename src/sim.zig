@@ -773,8 +773,12 @@ pub fn ringDir(angle: f32) Vec3 {
 /// The planets' (tilted) plane's normal: up, for `ringDir`'s counter-clockwise.
 const ring_normal = rotate(.{ 0, 1, 0 }, planet_tilt_axis, planet_tilt);
 
-/// How far `p` is from planet ring `ring` drawn around `center`: 0 on the
-/// circle itself, a planet's radius when its sphere just touches it.
+/// How far a point is from a planet ring's circle: 0 on the circle itself, a
+/// planet's radius when its sphere just touches it.
+/// @param p Vec3 the point
+/// @param center Vec3 the ring's center (the barycenter)
+/// @param ring u1 which ring (see `ringRadius`)
+/// @returns f32 the distance, in world units
 pub fn ringGap(p: Vec3, center: Vec3, ring: u1) f32 {
     const d = p - center;
     const h = dot(d, ring_normal);
@@ -838,16 +842,15 @@ fn spawnStar(world: *ecs.world_t, at: Vec3, mass: f32, radius: f32, rgba: u32) e
 
 /// Query over every `(Rel, mother)` link to draw: term 0 = `Position`,
 /// term 1 = optional `PrevPosition`, term 2 = the pair (target via
-/// `pairTarget(it, 2)`). Rel is `Cord` (child stars) or `InputOf` (planets).
-/// Caller owns it (`ecs.query_fini`).
-pub fn linkQuery(world: *ecs.world_t, comptime Rel: type) !*ecs.query_t {
-    return ecs.query_init(world, &.{
-        .terms = [_]ecs.term_t{
-            .{ .id = ecs.id(Position) },
-            .{ .id = ecs.id(PrevPosition), .oper = .Optional },
-            .{ .id = ecs.pair(ecs.id(Rel), ecs.Wildcard) },
-        } ++ ecs.array(ecs.term_t, ecs.FLECS_TERM_COUNT_MAX - 3),
-    });
+/// `pairTarget(it, 2)`), then terms 3… = the `extra` components. Rel is
+/// `Cord` (child stars) or `InputOf` (planets). Caller owns it (`ecs.query_fini`).
+pub fn linkQuery(world: *ecs.world_t, comptime Rel: type, comptime extra: []const type) !*ecs.query_t {
+    var desc: ecs.query_desc_t = .{};
+    desc.terms[0] = .{ .id = ecs.id(Position) };
+    desc.terms[1] = .{ .id = ecs.id(PrevPosition), .oper = .Optional };
+    desc.terms[2] = .{ .id = ecs.pair(ecs.id(Rel), ecs.Wildcard) };
+    inline for (extra, 3..) |T, k| desc.terms[k] = .{ .id = ecs.id(T) };
+    return ecs.query_init(world, &desc);
 }
 
 /// Query over every drawable entity, or only those with `Tag` (`Star`,
@@ -1112,7 +1115,6 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
         register(world);
         const sc = spawnScene(world, n);
         const f = ecs.get(world, ecs.id(StarField), StarField).?;
-        const normal = ring_normal;
         var speed = [2]?f32{ null, null };
         var inward = [2]f32{ 0, 0 };
         var on_ring = [2]f32{ 0, 0 };
@@ -1126,7 +1128,7 @@ test "planets: one even ring (or a bumped one for odd planets past the max), sam
             const phase = std.math.tau * @as(f32, @floatFromInt(i)) / n;
             try expect(distance(normalize(d), rotate(.{ @cos(phase), 0, -@sin(phase) }, planet_tilt_axis, planet_tilt)) < 1e-4);
             try expectApproxEqAbs(@as(f32, 0), dot(v, d), 1e-2); // tangential
-            try expect(distance(normalize(cross(d, v)), normal) < 1e-4); // on the plane
+            try expect(distance(normalize(cross(d, v)), ring_normal) < 1e-4); // on the plane
             // One speed per ring.
             if (speed[slot.ring]) |s0| try expectApproxEqAbs(s0, length(v), 1e-4) else speed[slot.ring] = length(v);
             inward[slot.ring] += -dot(fieldPull(f, positionOf(world, e)), normalize(d));
@@ -1276,9 +1278,9 @@ test "links: children hang on the mother by cords, planets are her inputs" {
     while (ecs.query_next(&sit)) stars += sit.count();
     try expectEqual(1 + sc.c.children.len, stars);
 
-    const cords = try linkQuery(world, Cord);
+    const cords = try linkQuery(world, Cord, &.{});
     defer ecs.query_fini(cords);
-    const inputs = try linkQuery(world, InputOf);
+    const inputs = try linkQuery(world, InputOf, &.{ Slot, Ball });
     defer ecs.query_fini(inputs);
     for ([_]*ecs.query_t{ cords, inputs }, [_]usize{ sc.c.children.len, sc.ps.len }) |q, want| {
         // Collect first, check after: a failed check mid-iteration would
@@ -1404,10 +1406,9 @@ fn slotOff(world: *ecs.world_t, e: ecs.entity_t) f32 {
 test "ringGap: distance to the ring's circle, in and out of its plane" {
     const c: Vec3 = .{ 1, 2, 3 };
     const r = ringRadius(1);
-    const up = ring_normal;
     try expectApproxEqAbs(@as(f32, 0), ringGap(c + ringDir(0.7) * splat(r), c, 1), 1e-4);
     try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(2) * splat(r + 0.5), c, 1), 1e-4);
-    try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(4) * splat(r) + up * splat(0.5), c, 1), 1e-4);
+    try expectApproxEqAbs(@as(f32, 0.5), ringGap(c + ringDir(4) * splat(r) + ring_normal * splat(0.5), c, 1), 1e-4);
     try expectApproxEqAbs(@as(f32, 3), ringGap(c + ringDir(1) * splat(r - 3), c, 1), 1e-4);
 }
 

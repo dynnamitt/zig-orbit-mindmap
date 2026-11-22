@@ -67,7 +67,7 @@ The scene lays out an Input-Process-Output model as a star system (sample data: 
 
 ### Rendering (main.zig)
 
-`forEachDrawn(query, callback)` runs a draw callback per entity of a sim query (all put `Position`, optional `PrevPosition` first; `ballQuery(world, ?Tag)` and `linkQuery(world, Rel)`, link targets via `pairTarget`). Per frame:
+`forEachDrawn(query, callback)` runs a draw callback per entity of a sim query (all put `Position`, optional `PrevPosition` first; `ballQuery(world, ?Tag)` and `linkQuery(world, Rel, extra)`, link targets via `pairTarget`). Per frame:
 
 1. **Glow pass** (`glowPass`, into a half-size texture): every ball in black (so planets hide the glow behind them), then cords, stars (`ballQuery(world, Star)`, drawn larger) and firing thrusters; then `blur_rounds` rounds of a separable 9-tap Gaussian (horizontal, then vertical, ping-ponging between `glow[0]` and `glow[1]`; taps `blur_spread` texels apart; `src/shaders/blur.fs`).
 2. **Starfield** (`drawSky`, before `beginMode3D`): `src/shaders/sky.fs` on a full-screen rectangle, added onto the background. Hashed stars on a sky sphere that turns with the camera (it gets the camera's axes scaled to the fov); a few twinkle.
@@ -83,7 +83,7 @@ Current scene: `spawnCluster` (a warm-white `Mother` star and three green childr
 - `snapshot` (`OnLoad`): `PrevPosition = Position`, for interpolation.
 - `cluster` (`PreUpdate`, run system): cord springs, a soft push between every pair of stars, and the mother's `Home` spring. Undamped on purpose: the cluster keeps wobbling.
 - `pull` (`PreUpdate`, per table): every star's gravity on each `Planet`, read from the `StarField` singleton, plus a deliberate damping of radial motion relative to the barycenter that keeps the orbits from drifting chaotically (why and how much: comments at the top of `sim.zig`).
-- `thrust` (`PreUpdate`, after `pull`): each planet's `Slot` (ring radius, phase turning at the ring's speed) keeps its place and the even spacing; past `thrust_on` × radius from it the planet's `Thruster` fires a capped damped spring back until within `thrust_off` (hysteresis). main draws its nozzle and exhaust (see Rendering).
+- `thrust` (`PreUpdate`, after `pull`): each planet's `Slot` (its ring, `ringRadius(ring)`, and a phase turning at the ring's speed) keeps its place and the even spacing; past `thrust_on` × radius from it the planet's `Thruster` fires a capped damped spring back until within `thrust_off` (hysteresis). main draws its nozzle and exhaust (see Rendering).
 - `move` (`OnUpdate`): position from velocity. Velocity changes in `PreUpdate` and `move` after it make semi-implicit Euler, which keeps orbits and springs bounded; keep that phase order if you add systems.
 - `barycenter` (`PostUpdate`, run system): publishes `StarField` (every star's position and mass, the barycenter and its drift) and the `Position` of the entity `ecs.id(Barycenter)`. `spawnCluster` seeds both. main interpolates that entity like a ball and points the camera at it.
 
