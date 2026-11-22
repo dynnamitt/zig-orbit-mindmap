@@ -39,6 +39,8 @@ const label_gap = 4; // pixels from the sphere's edge
 const glow_downscale = 2; // glow texture size = window size / this
 /// Glowing spheres are drawn this much larger than the stars, for a wider aura.
 const glow_grow = 1.4;
+/// Black occluder spheres in the glow pass, relative to the ball.
+const occluder_grow = 1.04;
 /// Horizontal + vertical blur rounds; each widens the aura.
 const blur_rounds = 2;
 /// Glow texels between the blur's taps (wider is softer; above ~2 it bands).
@@ -48,7 +50,8 @@ const blur_spread = 1.5;
 const glow_layers = 2;
 /// src/shaders/blur.fs with its header: GLSL ES 1.00 for WebGL 1, GLSL 330 on
 /// desktop (raylib's default vertex shader supplies fragTexCoord).
-const blur_fs = (if (builtin.os.tag == .emscripten)
+const web = builtin.os.tag == .emscripten;
+const blur_fs = (if (web)
     "#version 100\nprecision mediump float;\nvarying vec2 fragTexCoord;\n#define TEX texture2D\n#define FRAG gl_FragColor\n"
 else
     "#version 330\nin vec2 fragTexCoord;\nout vec4 fragOut;\n#define TEX texture\n#define FRAG fragOut\n") ++ @embedFile("shaders/blur.fs");
@@ -59,7 +62,6 @@ else
 const planet_ambient: f32 = 0.3;
 const planet_light_gain: f32 = 1.0;
 const planet_mesh_detail = 24; // rings and slices of the unit sphere
-const web = builtin.os.tag == .emscripten;
 const planet_vs = (if (web)
     "#version 100\nattribute vec3 vertexPosition;\nattribute vec3 vertexNormal;\nvarying vec3 fragPos;\nvarying vec3 fragNormal;\n"
 else
@@ -83,7 +85,7 @@ const web_simulate_infinite_loop = 1;
 // zflecs allocates through std.heap.page_allocator, which on wasm calls
 // memory.grow behind emscripten's back. That fails on emscripten's fixed-size
 // heap (panic: OOM in ecs.init), so take pages from emscripten's malloc.
-pub const os = if (builtin.os.tag == .emscripten) struct {
+pub const os = if (web) struct {
     pub const heap = struct {
         pub const page_allocator: std.mem.Allocator = .{ .ptr = undefined, .vtable = &EmscriptenPages.vtable };
     };
@@ -155,7 +157,7 @@ var frames: u32 = 0;
 var stats: sim.FrameStats = .{};
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    portrait = if (builtin.os.tag == .emscripten) webPortrait() else try hasArg(init.args, "--portrait");
+    portrait = if (web) webPortrait() else try hasArg(init.args, "--portrait");
     rl.initWindow(screenSize()[0], screenSize()[1], "zig-orbit-mindmap");
     defer rl.closeWindow();
 
@@ -190,14 +192,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     planet_mesh = rl.genMeshSphere(1, planet_mesh_detail, planet_mesh_detail);
     defer rl.unloadMesh(planet_mesh);
     planet_material = try rl.loadMaterialDefault();
+    defer rl.unloadMaterial(planet_material); // and the planet shader, once set
     planet_material.shader = try rl.loadShaderFromMemory(planet_vs, planet_fs);
-    defer rl.unloadMaterial(planet_material); // and its shader
     loc_star_count = rl.getShaderLocation(planet_material.shader, "starCount");
     loc_star_pos = rl.getShaderLocation(planet_material.shader, "starPos");
     loc_star_light = rl.getShaderLocation(planet_material.shader, "starLight");
+    // raylib falls back to its default shader when ours doesn't compile
+    // (e.g. only the ES 1.00 variant on web): fail instead of drawing unlit.
+    if (planet_material.shader.id == rlGetShaderIdDefault() or loc_star_count < 0 or loc_star_pos < 0 or loc_star_light < 0)
+        return error.PlanetShader;
     rl.setShaderValue(planet_material.shader, rl.getShaderLocation(planet_material.shader, "ambient"), &planet_ambient, .float);
 
-    if (builtin.os.tag == .emscripten) {
+    if (web) {
         // raylib's web pacing (WindowShouldClose's emscripten_sleep, SetTargetFPS's
         // WaitTime) isn't vsync-aligned and needs Asyncify. Never returns, so
         // the defers above don't run.
@@ -211,7 +217,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 fn frame() callconv(.c) void {
     const work_start = rl.getTime();
     // web/shell.html keeps Module.portrait in step with the viewport.
-    if (builtin.os.tag == .emscripten) {
+    if (web) {
         frames +%= 1;
         if (frames % orient_check_frames == 0 and webPortrait() != portrait) flip();
     }
@@ -242,7 +248,7 @@ fn frame() callconv(.c) void {
     rl.beginMode3D(frame_camera);
     drawStartRings();
     forEachDrawn(cords, drawCord);
-    forEachDrawn(stars, ballDrawer(1, null));
+    forEachDrawn(balls, drawUnlitBall);
     lightPlanets();
     forEachDrawn(planets, drawPlanet);
     forEachDrawn(inputs, drawInputLink);
@@ -335,7 +341,9 @@ fn glowPass(camera: rl.Camera3D) void {
     rl.clearBackground(.black);
     rl.beginMode3D(camera);
     // Every ball in black first, so planets in front of a star hide its glow.
-    forEachDrawn(balls, ballDrawer(1, .black));
+    // A touch larger than the planet mesh, whose facets reach further out
+    // than drawSphere's: no rim of glow over a planet's edge.
+    forEachDrawn(balls, ballDrawer(occluder_grow, .black));
     forEachDrawn(cords, drawCord);
     forEachDrawn(stars, ballDrawer(glow_grow, null));
     rl.endMode3D();
@@ -400,6 +408,12 @@ fn ballDrawer(comptime scale: f32, comptime color: ?rl.Color) fn (*ecs.iter_t, u
             rl.drawSphere(vec3(at), b.radius * scale, color orelse rl.getColor(b.rgba));
         }
     }.draw;
+}
+
+/// Every ball but the planets (lit by `drawPlanet`): stars and anything else.
+fn drawUnlitBall(it: *ecs.iter_t, i: usize, at: sim.Vec3) void {
+    if (ecs.has_id(it.world, it.entities()[i], ecs.id(sim.Planet))) return;
+    ballDrawer(1, null)(it, i, at);
 }
 
 /// A child's glowing cord to her mother.
@@ -538,6 +552,7 @@ fn vec3(v: sim.Vec3) rl.Vector3 {
 
 // rlgl, part of the raylib library; raylib-zig doesn't export it as a module.
 extern fn rlDrawRenderBatchActive() void;
+extern fn rlGetShaderIdDefault() c_uint;
 
 /// One right-aligned readout line; `line` 0 is the top.
 fn drawStat(text: [:0]const u8, line: i32) void {
