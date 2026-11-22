@@ -462,8 +462,9 @@ pub const OrbitCam = struct {
     const zoom_speed = 0.1;
     /// Just short of straight up or down, where the view's up vector flips.
     const max_pitch = std.math.pi / 2.0 - 0.05;
-    // Distances, as multiples of the radius `framing` is given: at 45° fovy
-    // and 16:9, frame_distance just fits the radius across with some margin.
+    // Distances, as multiples of the radius `framing` is given. In landscape
+    // frame_distance fits the tilted scene top to bottom with some margin;
+    // `fitDistance` backs off further where the width is the tighter fit.
     const frame_distance = 2.2;
     const frame_min = 0.3;
     const frame_max = 5;
@@ -495,7 +496,10 @@ pub const OrbitCam = struct {
     /// to the default framing, so a flip to portrait backs off just enough.
     pub fn reframe(self: *OrbitCam, from: f32, to: f32) void {
         const k = fitDistance(1, to) / fitDistance(1, from);
-        self.distance = std.math.clamp(self.distance * k, self.min_distance, self.max_distance);
+        // The limits scale too, so flipping back restores the same zoom.
+        self.distance *= k;
+        self.min_distance *= k;
+        self.max_distance *= k;
     }
 
     /// Mouse moved by (`dx`, `dy`) pixels with the button held: the scene
@@ -1207,4 +1211,10 @@ test "OrbitCam: portrait framing backs off so the scene fits across" {
     const zoomed = cam.distance / land.distance;
     cam.reframe(800.0 / 450.0, 450.0 / 800.0);
     try expectApproxEqAbs(zoomed, cam.distance / port.distance, 1e-4);
+    // Zoomed all the way out, flipping there and back keeps the zoom.
+    cam.zoom(-1000);
+    const far = cam.distance;
+    cam.reframe(450.0 / 800.0, 800.0 / 450.0);
+    cam.reframe(800.0 / 450.0, 450.0 / 800.0);
+    try expectApproxEqAbs(far, cam.distance, 1e-3);
 }

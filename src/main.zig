@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     stars = try sim.ballQuery(world, sim.Star);
     defer ecs.query_fini(stars);
 
-    try loadGlow();
+    glow = try loadGlow(screenSize());
     defer unloadGlow();
     blur = try rl.loadShaderFromMemory(null, blur_fs); // raylib's default vertex shader
     defer rl.unloadShader(blur);
@@ -233,24 +233,37 @@ fn aspect() f32 {
 }
 
 /// Switch orientation: the window, the glow textures and the camera's zoom.
+/// If the new glow textures can't be made, nothing changes.
 fn flip() void {
     const from = aspect();
     portrait = !portrait;
+    const fresh = loadGlow(screenSize()) catch {
+        portrait = !portrait;
+        return;
+    };
+    unloadGlow();
+    glow = fresh;
     cam.reframe(from, aspect());
     rl.setWindowSize(screenSize()[0], screenSize()[1]);
-    unloadGlow();
-    loadGlow() catch @panic("glow textures");
+    // A drag in progress spans two layouts: start it afresh.
+    touch = .{};
 }
 
 /// Glow textures at the current window size.
-fn loadGlow() !void {
-    for (&glow) |*g| {
-        g.* = try rl.loadRenderTexture(@divTrunc(screenSize()[0], glow_downscale), @divTrunc(screenSize()[1], glow_downscale));
+/// Glow textures for a window of `size`; none are left loaded on failure.
+fn loadGlow(size: [2]i32) ![2]rl.RenderTexture2D {
+    var out: [2]rl.RenderTexture2D = undefined;
+    for (&out, 0..) |*g, i| {
+        g.* = rl.loadRenderTexture(@divTrunc(size[0], glow_downscale), @divTrunc(size[1], glow_downscale)) catch |err| {
+            for (out[0..i]) |done| rl.unloadRenderTexture(done);
+            return err;
+        };
         rl.setTextureFilter(g.texture, .bilinear); // smooth when scaled up
         // raylib makes render textures repeat; the blur's edge taps would
         // then pick up glow from the opposite edge.
         rl.setTextureWrap(g.texture, .clamp);
     }
+    return out;
 }
 
 fn unloadGlow() void {

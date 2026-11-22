@@ -16,6 +16,7 @@
        than what the header leaves; width/height auto keep the aspect. */
     canvas { display: block; touch-action: none; box-sizing: border-box; width: auto; height: auto;
              max-width: 100vw; max-height: calc(100vh - 80px);
+             max-height: calc(100dvh - 80px); /* the visible height on mobile */
              border: 2px solid #2e7e7e; image-rendering: auto; }
     #status:empty { display: none; }
   </style>
@@ -44,7 +45,12 @@
       print: function (text) { console.log(text); },
       printErr: function (text) { console.error(text); },
     };
-    function orient() { Module.portrait = innerHeight > innerWidth ? 1 : 0; }
+    // Portrait when the 450x800 canvas would show larger than the 800x450
+    // one, after the header's ~80px (as in the canvas CSS).
+    function orient() {
+      var w = innerWidth, h = innerHeight - 80;
+      Module.portrait = Math.min(w / 450, h / 800) > Math.min(w / 800, h / 450) ? 1 : 0;
+    }
     orient();
     addEventListener("resize", orient);
     addEventListener("orientationchange", orient);
