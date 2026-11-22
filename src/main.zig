@@ -117,7 +117,8 @@ pub fn main() !void {
     defer _ = ecs.fini(world);
     sim.register(world);
     if (config.threads > 0) ecs.set_threads(world, config.threads); // -Dthreads, native only
-    _ = sim.spawnPlanets(world, sim.spawnCluster(world, .{ 0, 0, 0 }).mother);
+    var planets: [sim.planet_count]ecs.entity_t = undefined;
+    sim.spawnPlanets(world, sim.spawnCluster(world, .{ 0, 0, 0 }).mother, &planets);
     cam = sim.OrbitCam.framing(.{ 0, 0, 0 }, sim.system_radius);
 
     balls = try sim.ballQuery(world, null);
